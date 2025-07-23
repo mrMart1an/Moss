@@ -7,14 +7,15 @@ use std::{
 };
 
 use anyhow::{Context, Result};
-use moss_nv::fan_curve::{
-    FanCurve, hysteresis_curve::HysteresisCurve, linear_curve::LinearCurve,
-};
+use moss_nv::{device_data::DeviceData, fan_curve::{
+    hysteresis_curve::HysteresisCurve, linear_curve::LinearCurve, FanCurve
+}, logger};
 use nvml_wrapper::{Nvml, enum_wrappers::device::TemperatureSensor};
 use tokio::time;
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    logger::init_logging();
     let nvml = Nvml::init().with_context(|| "Failed to load NVML library")?;
 
     // Get the first GPU. You might want to iterate or select a specific one.
@@ -36,6 +37,7 @@ async fn main() -> Result<()> {
     curve.add_point((60, 100).into());
 
     let mut interval = time::interval(Duration::from_secs(2));
+    let mut data = DeviceData::default();
 
     while !term.load(Ordering::Relaxed) {
         // Get current temperature
@@ -48,12 +50,16 @@ async fn main() -> Result<()> {
             current_temp, actual_fan_speed
         );
 
-        device.set_fan_speed(0, curve.get_speed(current_temp).get())?;
+        //device.set_fan_speed(0, curve.get_speed(current_temp).get())?;
+
+        data.update(&mut device);
+
+        println!("{:?}", data);
 
         interval.tick().await;
     }
 
-    device.set_default_fan_speed(0)?;
+    //device.set_default_fan_speed(0)?;
 
     Ok(())
 }
