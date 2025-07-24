@@ -1,65 +1,50 @@
-use std::{
-    sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
-    },
-    time::Duration,
-};
+use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use moss_nv::{device_data::DeviceData, fan_curve::{
-    hysteresis_curve::HysteresisCurve, linear_curve::LinearCurve, FanCurve
-}, logger};
-use nvml_wrapper::{Nvml, enum_wrappers::device::TemperatureSensor};
-use tokio::time;
+use moss_nv::{
+    fan_manager::FanManager,
+    logger,
+};
+use nvml_wrapper::Nvml;
+use tokio::{signal::ctrl_c, sync::mpsc};
+use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
 #[tokio::main]
 async fn main() -> Result<()> {
     logger::init_logging();
-    let nvml = Nvml::init().with_context(|| "Failed to load NVML library")?;
 
-    // Get the first GPU. You might want to iterate or select a specific one.
-    let mut device = nvml.device_by_index(0)?;
+    // This token and tracker will be used to handle graceful shutdown
+    let tracker = TaskTracker::new();
+    let token = CancellationToken::new();
 
-    // Hood the signal handler
-    let term = Arc::new(AtomicBool::new(false));
-    signal_hook::flag::register(
-        signal_hook::consts::SIGTERM,
-        Arc::clone(&term),
-    )?;
-    signal_hook::flag::register(
-        signal_hook::consts::SIGINT,
-        Arc::clone(&term),
-    )?;
+    // NVML is thread-safe so it is safe to make
+    // simultaneous NVML calls from multiple threads.
+    // We can therefore simply wrap it in a Arc with no Mutex
+    let nvml =
+        Arc::new(Nvml::init().with_context(|| "Failed to load NVML library")?);
 
-    let mut curve = HysteresisCurve::new(LinearCurve::new(), 3, 3);
-    curve.add_point((70, 40).into());
-    curve.add_point((60, 100).into());
+    // Start the fan speed manager
+    let (_tx_fan_manager, rx_fan_manager) = mpsc::channel(16);
+    {
+        let nvml = nvml.clone();
+        let token = token.clone();
 
-    let mut interval = time::interval(Duration::from_secs(2));
-    let mut data = DeviceData::default();
-
-    while !term.load(Ordering::Relaxed) {
-        // Get current temperature
-        let current_temp = device.temperature(TemperatureSensor::Gpu)?;
-
-        let actual_fan_speed = device.fan_speed(0)?;
-
-        println!(
-            "Current GPU Temperature: {}°C, Actual Fan Speed: {}%",
-            current_temp, actual_fan_speed
-        );
-
-        //device.set_fan_speed(0, curve.get_speed(current_temp).get())?;
-
-        data.update(&mut device);
-
-        println!("{:?}", data);
-
-        interval.tick().await;
+        tracker.spawn(async move {
+            let mut fan_manager = FanManager::new(nvml);
+            fan_manager.run(token, rx_fan_manager).await.unwrap();
+        });
     }
 
-    //device.set_default_fan_speed(0)?;
+    // TODO: Handle different unix signal for graceful termination
+    ctrl_c().await?;
+
+    // Cancel the token to communicate the program
+    // termination to the running tasks
+    token.cancel();
+
+    // Wait for the tasks to finish
+    tracker.close();
+    tracker.wait().await;
 
     Ok(())
 }
