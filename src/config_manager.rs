@@ -49,11 +49,13 @@ pub enum ConfigMessage {
     // Requires the profiles  in the configuration
     ListProfiles(Responder),
 
+    // These functions returns a default configuration if the 
+    // requested UUID or name aren't specified in the configuration
     GetGpu { uuid: String, tx: Responder },
     GetFanCurve { name: String, tx: Responder },
     GetProfile { name: String, tx: Responder },
 
-    // These function automatically add the requested objects
+    // These functions automatically add the requested objects
     // to the corresponding lists if they don't already exist
     SetGpu(GpuConfig),
     SetFanCurve(FanCurveConfig),

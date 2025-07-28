@@ -11,6 +11,6 @@ serde = "1.0"
 serde_json = "1.0"
 tokio = { version = "1", features = ["full"] }
 tokio-util = { version = "0.7.15", features = ["rt"] }
-tracing = { version = "0.1.41", features = ["max_level_trace", "release_max_level_debug"] }
+tracing = { version = "0.1.41", features = [] }
 tracing-subscriber = {version = "0.3.19", features = ["env-filter", "tracing-log"]}
 zbus = "5.9.0"

@@ -114,7 +114,7 @@ impl FanManager {
                     // If any error occur send if to the error channel
                     if let Err(err) = self.update() {
                         tx_err.send(err).await.unwrap_or_else(|err| {
-                            error!("Fan manager: Couldn't send error to channel: {err}")
+                            error!("Failed to send error over channel: {err}");
                         });
                     }
                 }
