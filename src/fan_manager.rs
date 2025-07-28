@@ -91,7 +91,7 @@ impl FanManager {
 
                     if let Err(err) = self.clenup() {
                         tx_err.send(err).await.unwrap_or_else(|err| {
-                            error!("Fan manager: Couldn't send error to channel: {err}")
+                            error!("Failed to send error over channel: {err}");
                         });
                     }
 
@@ -104,7 +104,7 @@ impl FanManager {
 
                     if let Err(err) = self.parse_msg(message) {
                         tx_err.send(err).await.unwrap_or_else(|err| {
-                            error!("Fan manager: Couldn't send error to channel: {err}")
+                            error!("Failed to send error over channel: {err}");
                         });
                     }
                 },
