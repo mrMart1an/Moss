@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use moss_gpu::{
+use mossd::{
     arg_parser::ArgsOptions,
     config_manager::ConfigManager,
     fan_manager::FanManager,
