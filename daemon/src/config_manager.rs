@@ -260,8 +260,8 @@ impl ConfigManager {
         };
 
         // Send data to the channel
-        tx.send(answer).map_err(|err| {
-            anyhow!("Failed to send answer to channel: {err:?}")
+        tx.send(answer).map_err(|v| {
+            anyhow!("Failed to send answer to channel: {v:?}")
         })?;
 
         Ok(())

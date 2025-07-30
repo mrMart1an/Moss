@@ -4,6 +4,7 @@ use anyhow::{Context, Result};
 use nvml_wrapper::{Device, Nvml};
 
 // Store a NVML GPU device and the original NVML context
+#[derive(Debug, Clone)]
 pub struct GpuDevice {
     nvml: Arc<Nvml>,
 
@@ -31,5 +32,10 @@ impl GpuDevice {
                 ||
                 format!("Failed to retrive GPU device \"{}\"", uuid)
             )
+    }
+
+    // Return a reference to the NVML handle
+    pub fn nvml(&self) -> Arc<Nvml> {
+        self.nvml.clone()
     }
 }

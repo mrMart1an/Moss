@@ -1,18 +1,28 @@
+use std::{sync::Arc, time::Duration};
+
+use anyhow::{Result, anyhow};
 use nvml_wrapper::{
-    Device,
+    Device, Nvml,
     enum_wrappers::device::{
-        Clock, ClockId, TemperatureSensor,
-        TemperatureThreshold,
+        Clock, ClockId, TemperatureSensor, TemperatureThreshold,
     },
 };
+use tokio::time::Instant;
 use tracing::warn;
 
-#[derive(Debug, Default)]
-pub struct DeviceData {
-    // GPU information
-    pub name: String,
-    pub uuid: String,
+use crate::device::GpuDevice;
 
+#[derive(Default, Debug)]
+pub struct DeviceData {
+    // Store a reference to the GPU for more convenient data access 
+    gpu_device: Option<GpuDevice>,
+    last_update: Option<Instant>,
+
+    // GPU information
+    pub uuid: String,
+    pub name: String,
+
+    pub driver_version: String,
     pub vbios: String,
     pub num_cores: Option<u32>,
     pub pcie_width: Option<u32>,
@@ -40,9 +50,9 @@ pub struct DeviceData {
     // Power usage and power limit
     pub power_usage: Option<u32>,
     pub power_limit: Option<u32>,
-    pub power_limit_max: Option<u32>,
-    pub power_limit_min: Option<u32>,
-    pub power_limit_default: Option<u32>,
+    pub power_limit_max: u32,
+    pub power_limit_min: u32,
+    pub power_limit_default: u32,
 
     // Fan information
     pub fan_speed: Option<u32>,
@@ -65,29 +75,94 @@ pub struct DeviceData {
 }
 
 impl DeviceData {
-    pub fn update(&mut self, device: &Device) {
-        // Get device UUID
-        if let Ok(uuid) = device.uuid() {
-            // If the old UUID is set and is the same as
-            // the first UUID skip fetching the identical information
-            if self.uuid != uuid {
-                self.uuid = uuid;
+    pub fn new(gpu_device: &GpuDevice) -> Result<Self> {
+        let mut data = Self::default();
 
-                if let Ok(name) = device.name() {
-                    self.name = name;
+        // Store the GPU device in the struct and get a NVML device handle
+        data.gpu_device = Some(gpu_device.clone());
+        let device = gpu_device.get()?;
+
+        // Update the device for the first time
+        data.get_static_data(&gpu_device.nvml(), &device)?;
+        data.update(Duration::from_secs(1));
+
+        Ok(data)
+    }
+
+    // Update all of the device data
+    pub fn update(&mut self, update_rate: Duration) {
+        let elapsed = if let Some(last_update) = self.last_update {
+            last_update.elapsed()
+        } else {
+            self.last_update = Some(Instant::now());
+            self.last_update.unwrap().elapsed()
+        };
+
+        // Update only if necessary
+        if elapsed >= update_rate {
+            if let Some(gpu_device) = self.gpu_device.clone() {
+                if let Ok(device) = gpu_device.get() {
+                    self.update_temp(&device);
+                    self.update_memory_info(&device);
+                    self.update_utilization(&device);
+                    self.update_power(&device);
+                    self.update_frequency(&device);
+                    self.update_frequency(&device);
+                    self.update_fan(&device);
                 }
-
-                if let Ok(vbios) = device.vbios_version() {
-                    self.vbios = vbios;
-                }
-
-                self.num_cores = device.num_cores().ok();
-
-                self.pcie_width = device.current_pcie_link_width().ok();
-                self.pcie_gen = device.current_pcie_link_gen().ok();
             }
         }
+    }
 
+    fn get_static_data(
+        &mut self,
+        nvml: &Arc<Nvml>,
+        device: &Device,
+    ) -> Result<()> {
+        // Store the driver version
+        self.driver_version = nvml.sys_nvml_version()?;
+
+        // Get device UUID
+        self.uuid = device.uuid()?;
+        self.name = device.name()?;
+
+        self.vbios = device.vbios_version()?;
+
+        self.num_cores = Some(device.num_cores()?);
+
+        self.pcie_width = Some(device.current_pcie_link_width()?);
+        self.pcie_gen = Some(device.current_pcie_link_gen()?);
+
+        // Get power limit info
+        if let Ok(limits) = device.power_management_limit_constraints() {
+            self.power_limit_max = limits.max_limit;
+            self.power_limit_min = limits.min_limit;
+
+            Ok(())
+        } else {
+            Err(anyhow!("Failed to fetch power limit constrains"))
+        }?;
+
+        self.power_limit_default = device.power_management_limit_default()?;
+
+        // Temperature threshold
+        self.max_temp = device
+            .temperature_threshold(TemperatureThreshold::GpuMax)
+            .ok();
+        self.mem_max_temp = device
+            .temperature_threshold(TemperatureThreshold::MemoryMax)
+            .ok();
+        self.slowdown_temp = device
+            .temperature_threshold(TemperatureThreshold::Slowdown)
+            .ok();
+        self.shutdown_temp = device
+            .temperature_threshold(TemperatureThreshold::Shutdown)
+            .ok();
+
+        Ok(())
+    }
+
+    fn update_temp(&mut self, device: &Device) {
         // Get temperature data
         if let Ok(temp) = device.temperature(TemperatureSensor::Gpu) {
             self.temp_gpu = Some(temp);
@@ -96,7 +171,9 @@ impl DeviceData {
 
             warn!("Failed to fetch GPU temperature");
         }
+    }
 
+    fn update_memory_info(&mut self, device: &Device) {
         // Get memory info
         if let Ok(mem_info) = device.memory_info() {
             self.total_memory = Some(mem_info.total);
@@ -109,7 +186,9 @@ impl DeviceData {
 
             warn!("Failed to fetch GPU memory info");
         }
+    }
 
+    fn update_utilization(&mut self, device: &Device) {
         // Get utilization info
         if let Ok(utilization) = device.utilization_rates() {
             self.core_usage = Some(utilization.gpu);
@@ -120,23 +199,15 @@ impl DeviceData {
 
             warn!("Failed to fetch GPU utilization info");
         }
+    }
 
-        // Get utilization info
-        if let Ok(limits) = device.power_management_limit_constraints() {
-            self.power_limit_max = Some(limits.max_limit);
-            self.power_limit_min = Some(limits.min_limit);
-        } else {
-            self.power_limit_max = None;
-            self.power_limit_min = None;
-
-            warn!("Failed to fetch GPU power limit info");
-        }
-
+    fn update_power(&mut self, device: &Device) {
         // Power usage information
         self.power_usage = device.power_usage().ok();
         self.power_limit = device.power_management_limit().ok();
-        self.power_limit_default = device.power_management_limit_default().ok();
+    }
 
+    fn update_frequency(&mut self, device: &Device) {
         // Update current clocks
         self.graphics_freq =
             device.clock(Clock::Graphics, ClockId::Current).ok();
@@ -153,23 +224,11 @@ impl DeviceData {
         // Get the overclocking current offsets
         self.mem_clock_offset = device.mem_clock_vf_offset().ok();
         self.core_clock_offset = device.gpc_clock_vf_offset().ok();
+    }
 
+    fn update_fan(&mut self, device: &Device) {
         // Fan information
         self.fan_speed = device.fan_speed(0).ok();
         self.fan_speed_rpm = device.fan_speed_rpm(0).ok();
-
-        // Temperature threshold
-        self.max_temp = device
-            .temperature_threshold(TemperatureThreshold::GpuMax)
-            .ok();
-        self.mem_max_temp = device
-            .temperature_threshold(TemperatureThreshold::MemoryMax)
-            .ok();
-        self.slowdown_temp = device
-            .temperature_threshold(TemperatureThreshold::Slowdown)
-            .ok();
-        self.shutdown_temp = device
-            .temperature_threshold(TemperatureThreshold::Shutdown)
-            .ok();
     }
 }
