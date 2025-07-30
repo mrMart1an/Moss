@@ -62,16 +62,6 @@ pub enum ConfigMessage {
     SetProfile(ProfileConfig),
 }
 
-// Manage the stored daemon Json configuration
-pub struct ConfigManager {
-    config_path: PathBuf,
-
-    // Stored as UUID
-    gpu_configs: HashMap<String, GpuConfig>,
-    fan_curve_configs: HashMap<String, FanCurveConfig>,
-    profile_configs: HashMap<String, ProfileConfig>,
-}
-
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct GpuConfig {
     pub uuid: String,
@@ -99,6 +89,16 @@ pub struct FanCurveConfig {
     pub hysteresis_down: u32,
 }
 
+// Manage the stored daemon Json configuration
+pub struct ConfigManager {
+    config_path: PathBuf,
+
+    // Stored as UUID
+    gpu_configs: HashMap<String, GpuConfig>,
+    fan_curve_configs: HashMap<String, FanCurveConfig>,
+    profile_configs: HashMap<String, ProfileConfig>,
+}
+
 impl ConfigManager {
     // Create a new configuration manager
     pub fn new(config_path: &Path) -> Self {
@@ -115,7 +115,7 @@ impl ConfigManager {
     pub async fn run(
         &mut self,
         run_token: CancellationToken,
-        mut rx_cmd: Receiver<ConfigMessage>,
+        mut rx_message: Receiver<ConfigMessage>,
         tx_err: Sender<anyhow::Error>,
     ) {
         info!("Config manager: Running");
@@ -140,7 +140,7 @@ impl ConfigManager {
 
                     break;
                 },
-                message = rx_cmd.recv() => {
+                message = rx_message.recv() => {
                     if let Err(err) = self.parse_message(message) {
                         tx_err.send(err).await.unwrap_or_else(|err| {
                             error!("Failed to send error over channel: {err}");
