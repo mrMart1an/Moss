@@ -2,10 +2,7 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use mossd::{
-    arg_parser::ArgsOptions,
-    config_manager::ConfigManager,
-    fan_manager::FanManager,
-    logger, state_manager::StateManager,
+    arg_parser::ArgsOptions, config_manager::ConfigManager, dbus_service::DBusService, fan_manager::FanManager, gpus_manager::GpusManager, logger, state_manager::StateManager
 };
 use nvml_wrapper::Nvml;
 use tokio::{signal::ctrl_c, sync::mpsc};
@@ -46,6 +43,20 @@ async fn main() -> Result<()> {
     let nvml =
         Arc::new(Nvml::init().with_context(|| "Failed to load NVML library")?);
 
+    // Start the GPUs manager
+    let (tx_gpus_manager, rx_gpus_manager) = mpsc::channel(16);
+    {
+        let nvml = nvml.clone();
+        let token = token.clone();
+        let tx_err = tx_err.clone();
+
+
+        tracker.spawn(async move {
+            let mut gpus_manager = GpusManager::new(nvml);
+            gpus_manager.run(token, rx_gpus_manager, tx_err).await;
+        });
+    }
+
     // Start the fan speed manager
     let (tx_fan_manager, rx_fan_manager) = mpsc::channel(16);
     {
@@ -59,6 +70,18 @@ async fn main() -> Result<()> {
         });
     }
 
+    // Start the D-Bus service
+    let (tx_dbus_service, rx_dbus_service) = mpsc::channel(16);
+    {
+        let token = token.clone();
+        let tx_err = tx_err.clone();
+
+        tracker.spawn(async move {
+            let mut dbus_service = DBusService::new();
+            dbus_service.run(token, tx_dbus_service, tx_err).await;
+        });
+    }
+
     // Start the state manager
     {
         let nvml = nvml.clone();
@@ -68,8 +91,11 @@ async fn main() -> Result<()> {
             let mut state_manager = StateManager::new(
                 nvml,
 
+                rx_dbus_service,
+
                 tx_fan_manager, 
-                tx_config_manager
+                tx_config_manager,
+                tx_gpus_manager
             );
 
             state_manager.run(token, rx_err).await;

@@ -1,3 +1,4 @@
+pub mod fan_mode;
 pub mod linear_curve;
 pub mod hysteresis_curve;
 
@@ -7,11 +8,11 @@ pub trait FanCurve {
     // Delete a point to the fan curve
     fn remove_point(&mut self, point: CurvePoint);
 
-    // Return the fan speed for the given temperature
-    fn get_speed(&self, temp: u32) -> FanSpeed;
-
     // Return the number of points in the curve
     fn points_num(&self) -> usize;
+
+    // Return the fan speed for the given temperature
+    fn get_speed(&self, temp: u32) -> FanSpeed;
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

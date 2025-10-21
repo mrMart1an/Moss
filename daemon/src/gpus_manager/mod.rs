@@ -131,9 +131,9 @@ pub struct GpusManager {
 }
 
 impl GpusManager {
-    pub fn new(nvml: &Arc<Nvml>) -> Self {
+    pub fn new(nvml: Arc<Nvml>) -> Self {
         Self {
-            nvml: nvml.clone(),
+            nvml: nvml,
             devices: HashMap::new(),
             device_datas: HashMap::new(),
 

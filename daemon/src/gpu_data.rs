@@ -1,0 +1,55 @@
+// GPU data is information that is update in real time
+
+// Store the vendor specific GPU data
+pub enum GpuVendorData {
+    Nvidia {
+
+    },
+    AMD {
+        // TODO: AMD vendor data
+    },
+    Intel {
+        // TODO: Intel vendor data
+    },
+}
+
+// Store the general GPU data
+pub struct GpuData {
+    pub temp_gpu: u32,
+
+    // Core and memory current frequency
+    pub graphics_freq: u32,
+    pub video_freq: u32,
+    pub sm_freq: u32,
+    pub mem_freq: u32,
+
+    // Core and memory max boost frequency
+    pub graphics_boost_freq: u32,
+    pub video_boost_freq: u32,
+    pub sm_boost_freq: u32,
+    pub mem_boost_freq: u32,
+
+    // Overclocking frequency offsets
+    pub core_clock_offset: i32,
+    pub mem_clock_offset: i32,
+
+    // Power usage and power limit
+    pub power_usage: u32,
+    pub power_limit: u32,
+    pub power_limit_max: u32,
+    pub power_limit_min: u32,
+    pub power_limit_default: u32,
+
+    // Fan information
+    pub fan_speed: u32,
+    pub fan_speed_rpm: u32,
+
+    // Utilization information
+    pub core_usage: u32,
+    pub mem_usage: u32,
+
+    // Memory utilization information, all values in bytes
+    pub total_memory: u64,
+    pub used_memory: u64,
+    pub free_memory: u64,
+}
