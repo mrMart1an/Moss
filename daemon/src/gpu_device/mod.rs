@@ -10,7 +10,6 @@ use crate::{
 pub enum GpuVendor {
     Nvidia,
     AMD,
-    Intel,
 }
 
 // GPU device trait

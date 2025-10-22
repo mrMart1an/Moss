@@ -8,9 +8,6 @@ pub enum GpuVendorData {
     AMD {
         // TODO: AMD vendor data
     },
-    Intel {
-        // TODO: Intel vendor data
-    },
 }
 
 // Store the general GPU data

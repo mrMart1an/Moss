@@ -17,9 +17,6 @@ pub enum GpuVendorInfo {
     AMD {
         // TODO: AMD vendor info
     },
-    Intel {
-        // TODO: Intel vendor info
-    },
 }
 
 // Store GPU general information
