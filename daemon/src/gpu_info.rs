@@ -1,6 +1,7 @@
 // GPU info are static information that are query only once
 
 // Store vendor specific information
+#[derive(Debug, Clone)]
 pub enum GpuVendorInfo {
     Nvidia {
         driver_version: String,
@@ -9,10 +10,10 @@ pub enum GpuVendorInfo {
         cuda_core_count: u32,
 
         // GPU temperature threshold
-        max_temp: Option<u32>,
-        mem_max_temp: Option<u32>,
-        slowdown_temp: Option<u32>,
-        shutdown_temp: Option<u32>,
+        max_temp: u32,
+        mem_max_temp: u32,
+        slowdown_temp: u32,
+        shutdown_temp: u32,
     },
     AMD {
         // TODO: AMD vendor info
@@ -20,6 +21,7 @@ pub enum GpuVendorInfo {
 }
 
 // Store GPU general information
+#[derive(Debug, Clone)]
 pub struct GpuInfo {
     pub uuid: String,
     pub name: String,
