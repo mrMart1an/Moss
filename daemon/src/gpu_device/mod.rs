@@ -1,5 +1,7 @@
 pub mod nvidia_device;
 
+use std::time::Duration;
+
 use anyhow::Result;
 
 use crate::{
@@ -21,12 +23,12 @@ pub trait GpuDevice {
 
     // Set the device fan curve, this does not automatically
     // set the fan mode to curve
-    fn set_fan_curve(&self, fan_curve: Box<dyn FanCurve + Send>);
+    fn set_fan_curve(&mut self, fan_curve: Box<dyn FanCurve + Send>);
     // Set the device fan mode, if no fan curve was previously set
     // default to a 100% fan speed curve
-    fn set_fan_mode(&self, fan_mode: FanMode) -> Result<()>;
+    fn set_fan_mode(&mut self, fan_mode: FanMode) -> Result<()>;
     // Update the fan speed according to the mode and the fan curve
-    fn update_fan(&self);
+    fn update_fan(&mut self);
 
     // Return the device vendor specific information
     fn get_vendor_info(&self) -> GpuVendorInfo;
@@ -36,13 +38,15 @@ pub trait GpuDevice {
     // Return the device vendor specific real time data,
     // the update frequency is controlled by the set_update_freq function,
     // the default update frequency is 1 hertz
-    fn get_vendor_data(&self) -> GpuVendorData;
+    fn get_vendor_data(&mut self) -> GpuVendorData;
     // Return the device general real time data
     // the update frequency is controlled by the set_update_freq function,
     // the default update frequency is 1 hertz
-    fn get_gpu_data(&self) -> GpuData;
+    fn get_gpu_data(&mut self) -> GpuData;
+    // Change the vendor and general data update frequency
+    fn set_data_update_freq(&mut self, update_freq: f32);
 
     // Apply the given GPU configuration to the device
     // The configuration vendor must match the
-    fn apply_gpu_config(&self, gpu_config: GpuConfig) -> Result<()>;
+    fn apply_gpu_config(&mut self, gpu_config: GpuConfig) -> Result<()>;
 }

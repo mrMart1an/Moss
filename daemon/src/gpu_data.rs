@@ -1,9 +1,14 @@
 // GPU data is information that is update in real time
 
 // Store the vendor specific GPU data
+#[derive(Debug, Clone)]
 pub enum GpuVendorData {
     Nvidia {
+        sm_freq: u32,
+        video_freq: u32,
 
+        sm_boost_freq: u32,
+        video_boost_freq: u32,
     },
     AMD {
         // TODO: AMD vendor data
@@ -11,19 +16,16 @@ pub enum GpuVendorData {
 }
 
 // Store the general GPU data
+#[derive(Debug, Clone)]
 pub struct GpuData {
     pub temp_gpu: u32,
 
     // Core and memory current frequency
     pub graphics_freq: u32,
-    pub video_freq: u32,
-    pub sm_freq: u32,
     pub mem_freq: u32,
 
     // Core and memory max boost frequency
     pub graphics_boost_freq: u32,
-    pub video_boost_freq: u32,
-    pub sm_boost_freq: u32,
     pub mem_boost_freq: u32,
 
     // Overclocking frequency offsets
@@ -33,9 +35,6 @@ pub struct GpuData {
     // Power usage and power limit
     pub power_usage: u32,
     pub power_limit: u32,
-    pub power_limit_max: u32,
-    pub power_limit_min: u32,
-    pub power_limit_default: u32,
 
     // Fan information
     pub fan_speed: u32,
