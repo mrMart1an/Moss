@@ -15,10 +15,9 @@ use tracing::warn;
 
 use crate::{
     fan_curve::{
-        CurvePoint, FanCurve, fan_mode::FanMode,
-        hysteresis_curve::HysteresisCurve, linear_curve::LinearCurve,
+        fan_mode::FanMode, hysteresis_curve::HysteresisCurve, linear_curve::LinearCurve, CurvePoint, FanCurve
     },
-    gpu_config::GpuConfig,
+    gpu_config::{GpuConfig, VendorConfig},
     gpu_data::{GpuData, GpuVendorData},
     gpu_device::{GpuDevice, GpuVendor},
     gpu_info::{GpuInfo, GpuVendorInfo},
@@ -323,7 +322,7 @@ impl GpuDevice for NvidiaDevice {
 
         match self.fan_mode {
             FanMode::Curve => {
-                // If the query for the temperature fail return 
+                // If the query for the temperature fail return
                 // 110 degrees for safety
                 let temp = device
                     .temperature(TemperatureSensor::Gpu)
@@ -382,6 +381,23 @@ impl GpuDevice for NvidiaDevice {
     // Apply the given GPU configuration to the device
     // The configuration vendor must match the
     fn apply_gpu_config(&mut self, gpu_config: GpuConfig) -> Result<()> {
-        todo!();
+        // Get the NVML device
+        let mut device = self.get_device()?;
+
+        // Set the power limit
+        device.set_power_management_limit(gpu_config.power_limit)?;
+
+        // Set vendor specific config
+        match gpu_config.vendor_config {
+            VendorConfig::Nvidia { core_clock_offset, mem_clock_offset } => {
+                device.set_gpc_clock_vf_offset(core_clock_offset)?;
+                device.set_mem_clock_vf_offset(mem_clock_offset)?;
+            }
+            _ => {
+                warn!("Mismatched vendor config provided")
+            }
+        }
+
+        Ok(())
     }
 }

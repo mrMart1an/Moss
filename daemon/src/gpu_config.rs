@@ -1,8 +1,8 @@
 // Vendor specific configuration
 pub enum VendorConfig {
     Nvidia {
-        core_clock_offset: u32,
-        mem_clock_offset: u32,
+        core_clock_offset: i32,
+        mem_clock_offset: i32,
     },
     AMD {
         // TODO: AMD GPU config
