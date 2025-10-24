@@ -9,11 +9,15 @@ use nvml_wrapper::{
     enum_wrappers::device::{
         Clock, ClockId, TemperatureSensor, TemperatureThreshold,
     },
+    enums::device::FanControlPolicy,
 };
 use tracing::warn;
 
 use crate::{
-    fan_curve::{FanCurve, fan_mode::FanMode},
+    fan_curve::{
+        CurvePoint, FanCurve, fan_mode::FanMode,
+        hysteresis_curve::HysteresisCurve, linear_curve::LinearCurve,
+    },
     gpu_config::GpuConfig,
     gpu_data::{GpuData, GpuVendorData},
     gpu_device::{GpuDevice, GpuVendor},
@@ -39,6 +43,11 @@ pub struct NvidiaDevice {
     gpu_data_update_interval: Duration,
     // Instant of the last data update
     gpu_data_last_update: Instant,
+
+    // Store the current fan mode
+    fan_mode: FanMode,
+    // Fan curve to apply in curve mode
+    fan_curve: Box<dyn FanCurve + Send>,
 }
 
 impl NvidiaDevice {
@@ -69,6 +78,22 @@ impl NvidiaDevice {
                 format!("Failed to retrive GPU vendor data for \"{}\"", uuid)
             })?;
 
+        // Determine the current fan mode
+        // We can't just assume it is automatic, if an old instance of
+        // the program changed it and crashed if could still be manual
+        // TODO: Handle multiple fan
+        let fan_mode = if device.fan_control_policy(0)?
+            == FanControlPolicy::TemperatureContinousSw
+        {
+            FanMode::Auto
+        } else {
+            FanMode::Curve
+        };
+
+        // Generate a default fan curve always at 100% fan speed
+        let mut fan_curve = Box::new(LinearCurve::new());
+        fan_curve.add_point((0, 100).into());
+
         Ok(Self {
             nvml: nvml.clone(),
             uuid: uuid.to_string(),
@@ -81,6 +106,9 @@ impl NvidiaDevice {
 
             gpu_data_update_interval: Duration::from_secs(1),
             gpu_data_last_update: Instant::now(),
+
+            fan_mode,
+            fan_curve,
         })
     }
 
@@ -235,16 +263,64 @@ impl GpuDevice for NvidiaDevice {
     // Set the device fan curve, this does not automatically
     // set the fan mode to curve
     fn set_fan_curve(&mut self, fan_curve: Box<dyn FanCurve + Send>) {
-        todo!();
+        self.fan_curve = fan_curve;
     }
     // Set the device fan mode, if no fan curve was previously set
     // default to a 100% fan speed curve
     fn set_fan_mode(&mut self, fan_mode: FanMode) -> Result<()> {
-        todo!();
+        match fan_mode {
+            FanMode::Auto => self
+                .get_device()?
+                .set_fan_control_policy(
+                    0,
+                    FanControlPolicy::TemperatureContinousSw,
+                )
+                .with_context(|| {
+                    format!(
+                        "Failed to set fan mode to automatic for: \"{}\"",
+                        self.uuid
+                    )
+                })?,
+            _ => self
+                .get_device()?
+                .set_fan_control_policy(0, FanControlPolicy::Manual)
+                .with_context(|| {
+                    format!(
+                        "Failed to set fan mode to manual for: \"{}\"",
+                        self.uuid
+                    )
+                })?,
+        }
+
+        self.fan_mode = fan_mode;
+
+        Ok(())
     }
     // Update the fan speed according to the mode and the fan curve
     fn update_fan(&mut self) {
-        todo!();
+        let mut device = if let Ok(dev) = self.get_device() {
+            dev
+        } else {
+            warn!("Device acquisition error while setting fan speed");
+            return;
+        };
+
+        match self.fan_mode {
+            FanMode::Curve => {
+                // If the query for the temperature fail return 
+                // 110 degrees for safety
+                let temp = device
+                    .temperature(TemperatureSensor::Gpu)
+                    .unwrap_or_else(|_| 110);
+                let fan_speed = self.fan_curve.get_speed(temp);
+
+                device.set_fan_speed(0, fan_speed.get());
+            }
+            FanMode::Manual(speed) => {
+                device.set_fan_speed(0, speed.get());
+            }
+            _ => {}
+        }
     }
 
     // Return the device vendor specific information
