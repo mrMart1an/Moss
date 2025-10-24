@@ -27,7 +27,10 @@ pub trait GpuDevice {
     // Set the device fan mode, if no fan curve was previously set
     // default to a 100% fan speed curve
     fn set_fan_mode(&mut self, fan_mode: FanMode) -> Result<()>;
+    // Change the fan speed update interval
+    fn set_fan_update_interval(&mut self, update_interval: Duration);
     // Update the fan speed according to the mode and the fan curve
+    // the default update frequency is 0.5 hertz
     fn update_fan(&mut self);
 
     // Return the device vendor specific information
@@ -43,8 +46,8 @@ pub trait GpuDevice {
     // the update frequency is controlled by the set_update_freq function,
     // the default update frequency is 1 hertz
     fn get_gpu_data(&mut self) -> GpuData;
-    // Change the vendor and general data update frequency
-    fn set_data_update_freq(&mut self, update_freq: f32);
+    // Change the vendor and general data update interval
+    fn set_data_update_interval(&mut self, update_interval: Duration);
 
     // Apply the given GPU configuration to the device
     // The configuration vendor must match the

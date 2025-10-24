@@ -48,6 +48,10 @@ pub struct NvidiaDevice {
     fan_mode: FanMode,
     // Fan curve to apply in curve mode
     fan_curve: Box<dyn FanCurve + Send>,
+    // Fan update interval
+    fan_update_interval: Duration,
+    // Instant of the last fan update
+    fan_last_update: Instant,
 }
 
 impl NvidiaDevice {
@@ -109,6 +113,8 @@ impl NvidiaDevice {
 
             fan_mode,
             fan_curve,
+            fan_update_interval: Duration::from_secs(2),
+            fan_last_update: Instant::now(),
         })
     }
 
@@ -296,8 +302,18 @@ impl GpuDevice for NvidiaDevice {
 
         Ok(())
     }
+    // Change the fan speed update frequency
+    fn set_fan_update_interval(&mut self, update_interval: Duration) {
+        self.fan_update_interval = update_interval;
+    }
     // Update the fan speed according to the mode and the fan curve
     fn update_fan(&mut self) {
+        // Check if an update is necessary
+        if self.fan_last_update.elapsed() < self.fan_update_interval {
+            return;
+        }
+
+        // Get the NVML device
         let mut device = if let Ok(dev) = self.get_device() {
             dev
         } else {
@@ -359,9 +375,8 @@ impl GpuDevice for NvidiaDevice {
         self.gpu_data.clone()
     }
     // Change the vendor and general data update frequency
-    fn set_data_update_freq(&mut self, update_freq: f32) {
-        let interval = Duration::from_secs_f32(1. / update_freq);
-        self.gpu_data_update_interval = interval;
+    fn set_data_update_interval(&mut self, update_interval: Duration) {
+        self.gpu_data_update_interval = update_interval;
     }
 
     // Apply the given GPU configuration to the device
