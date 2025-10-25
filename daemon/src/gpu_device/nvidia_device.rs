@@ -14,13 +14,13 @@ use nvml_wrapper::{
 use tracing::warn;
 
 use crate::{
-    fan_curve::{
-        fan_mode::FanMode, hysteresis_curve::HysteresisCurve, linear_curve::LinearCurve, CurvePoint, FanCurve
+    fan_curve::{FanCurve, fan_mode::FanMode, linear_curve::LinearCurve},
+    gpu_device::{
+        GpuDevice, GpuVendor,
+        gpu_config::{GpuConfig, VendorConfig},
+        gpu_data::{GpuData, GpuVendorData},
+        gpu_info::{GpuInfo, GpuVendorInfo},
     },
-    gpu_config::{GpuConfig, VendorConfig},
-    gpu_data::{GpuData, GpuVendorData},
-    gpu_device::{GpuDevice, GpuVendor},
-    gpu_info::{GpuInfo, GpuVendorInfo},
 };
 
 pub struct NvidiaDevice {
@@ -389,7 +389,10 @@ impl GpuDevice for NvidiaDevice {
 
         // Set vendor specific config
         match gpu_config.vendor_config {
-            VendorConfig::Nvidia { core_clock_offset, mem_clock_offset } => {
+            VendorConfig::Nvidia {
+                core_clock_offset,
+                mem_clock_offset,
+            } => {
                 device.set_gpc_clock_vf_offset(core_clock_offset)?;
                 device.set_mem_clock_vf_offset(mem_clock_offset)?;
             }

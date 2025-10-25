@@ -14,8 +14,6 @@ use tracing::{error, info, warn};
 
 use crate::{device::GpuDevice, gpus_manager::gpu_data::DeviceData};
 
-pub mod gpu_data;
-
 type Responder = oneshot::Sender<GpusManagerAnswer>;
 
 pub enum GpusManagerMessage {

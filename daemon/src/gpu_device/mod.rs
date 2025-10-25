@@ -1,3 +1,7 @@
+pub mod gpu_config;
+pub mod gpu_data;
+pub mod gpu_info;
+
 pub mod nvidia_device;
 
 use std::time::Duration;
@@ -6,9 +10,11 @@ use anyhow::Result;
 
 use crate::{
     fan_curve::{FanCurve, fan_mode::FanMode},
-    gpu_config::GpuConfig,
-    gpu_data::{GpuData, GpuVendorData},
-    gpu_info::{GpuInfo, GpuVendorInfo},
+    gpu_device::{
+        gpu_config::GpuConfig,
+        gpu_data::{GpuData, GpuVendorData},
+        gpu_info::{GpuInfo, GpuVendorInfo},
+    },
 };
 
 pub enum GpuVendor {
