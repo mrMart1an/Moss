@@ -25,7 +25,7 @@ pub enum GpuVendor {
 // GPU device trait
 pub trait GpuDevice {
     // Return the device vendor
-    fn get_vendor() -> GpuVendor;
+    fn get_vendor(&self) -> GpuVendor;
 
     // Set the device fan curve, this does not automatically
     // set the fan mode to curve

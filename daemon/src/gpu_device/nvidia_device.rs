@@ -3,15 +3,16 @@ use std::{
     time::{Duration, Instant},
 };
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow};
 use nvml_wrapper::{
     Device, Nvml,
     enum_wrappers::device::{
         Clock, ClockId, TemperatureSensor, TemperatureThreshold,
     },
     enums::device::FanControlPolicy,
+    error::NvmlError,
 };
-use tracing::warn;
+use tracing::{debug, warn};
 
 use crate::{
     fan_curve::{FanCurve, fan_mode::FanMode, linear_curve::LinearCurve},
@@ -54,7 +55,7 @@ pub struct NvidiaDevice {
 }
 
 impl NvidiaDevice {
-    pub fn new(nvml: &Arc<Nvml>, uuid: &str) -> Result<Self> {
+    pub fn new(nvml: Arc<Nvml>, uuid: &str) -> Result<Self> {
         let device = nvml.device_by_uuid(uuid).with_context(|| {
             format!("Failed to retrive GPU device \"{}\"", uuid)
         })?;
@@ -127,11 +128,6 @@ impl NvidiaDevice {
         })
     }
 
-    // Return a reference to the NVML handle
-    fn nvml(&self) -> Arc<Nvml> {
-        self.nvml.clone()
-    }
-
     fn get_gpu_info<'a, 'b>(device: &'a Device<'b>) -> Result<GpuInfo> {
         let power_limit_constraints =
             device.power_management_limit_constraints()?;
@@ -155,14 +151,18 @@ impl NvidiaDevice {
             driver_version: driver_version,
             vbios: device.vbios_version()?,
             cuda_core_count: device.num_cores()?,
-            max_temp: device
-                .temperature_threshold(TemperatureThreshold::GpuMax)?,
-            mem_max_temp: device
-                .temperature_threshold(TemperatureThreshold::MemoryMax)?,
-            slowdown_temp: device
-                .temperature_threshold(TemperatureThreshold::Slowdown)?,
-            shutdown_temp: device
-                .temperature_threshold(TemperatureThreshold::Shutdown)?,
+            max_temp: Self::ok_support(
+                device.temperature_threshold(TemperatureThreshold::GpuMax),
+            )?,
+            mem_max_temp: Self::ok_support(
+                device.temperature_threshold(TemperatureThreshold::MemoryMax),
+            )?,
+            slowdown_temp: Self::ok_support(
+                device.temperature_threshold(TemperatureThreshold::Slowdown),
+            )?,
+            shutdown_temp: Self::ok_support(
+                device.temperature_threshold(TemperatureThreshold::Shutdown),
+            )?,
         })
     }
 
@@ -207,11 +207,6 @@ impl NvidiaDevice {
             graphics_freq: device.clock(Clock::Graphics, ClockId::Current)?,
             mem_freq: device.clock(Clock::Memory, ClockId::Current)?,
 
-            graphics_boost_freq: device
-                .clock(Clock::Memory, ClockId::CustomerMaxBoost)?,
-            mem_boost_freq: device
-                .clock(Clock::Memory, ClockId::CustomerMaxBoost)?,
-
             core_clock_offset: device.gpc_clock_vf_offset()?,
             mem_clock_offset: device.mem_clock_vf_offset()?,
 
@@ -234,12 +229,25 @@ impl NvidiaDevice {
         device: &'a Device<'b>,
     ) -> Result<GpuVendorData> {
         Ok(GpuVendorData::Nvidia {
-            sm_freq: device.clock(Clock::SM, ClockId::Current)?,
-            video_freq: device.clock(Clock::Video, ClockId::Current)?,
-            sm_boost_freq: device
-                .clock(Clock::Video, ClockId::CustomerMaxBoost)?,
-            video_boost_freq: device
-                .clock(Clock::Video, ClockId::CustomerMaxBoost)?,
+            sm_freq: Self::ok_support(
+                device.clock(Clock::SM, ClockId::Current),
+            )?,
+            video_freq: Self::ok_support(
+                device.clock(Clock::Video, ClockId::Current),
+            )?,
+
+            graphics_boost_freq: Self::ok_support(
+                device.clock(Clock::Graphics, ClockId::CustomerMaxBoost),
+            )?,
+            mem_boost_freq: Self::ok_support(
+                device.clock(Clock::Memory, ClockId::CustomerMaxBoost),
+            )?,
+            sm_boost_freq: Self::ok_support(
+                device.clock(Clock::Video, ClockId::CustomerMaxBoost),
+            )?,
+            video_boost_freq: Self::ok_support(
+                device.clock(Clock::Video, ClockId::CustomerMaxBoost),
+            )?,
         })
     }
 
@@ -257,11 +265,22 @@ impl NvidiaDevice {
 
         Ok(())
     }
+
+    // If the given result is Ok(T) return Ok(Some(T))
+    // If the given result is a non supported error return Ok(None)
+    // If the given result is any other kind of error return Err(e)
+    fn ok_support<T>(value: Result<T, NvmlError>) -> Result<Option<T>> {
+        match value {
+            Ok(v) => Ok(Some(v)),
+            Err(NvmlError::NotSupported) => Ok(None),
+            Err(e) => Err(anyhow!("{}", e)),
+        }
+    }
 }
 
 impl GpuDevice for NvidiaDevice {
     // Return the device vendor
-    fn get_vendor() -> GpuVendor {
+    fn get_vendor(&self) -> GpuVendor {
         GpuVendor::Nvidia
     }
 
@@ -329,10 +348,22 @@ impl GpuDevice for NvidiaDevice {
                     .unwrap_or_else(|_| 110);
                 let fan_speed = self.fan_curve.get_speed(temp);
 
-                device.set_fan_speed(0, fan_speed.get());
+                device
+                    .set_fan_speed(0, fan_speed.get())
+                    .unwrap_or_else(|e| {
+                        warn!(
+                            "Failed to set fan speed for device \"{}\": {}",
+                            self.uuid, e
+                        )
+                    });
             }
             FanMode::Manual(speed) => {
-                device.set_fan_speed(0, speed.get());
+                device.set_fan_speed(0, speed.get()).unwrap_or_else(|e| {
+                    warn!(
+                        "Failed to set fan speed for device \"{}\": {}",
+                        self.uuid, e
+                    )
+                });
             }
             _ => {}
         }
@@ -356,6 +387,9 @@ impl GpuDevice for NvidiaDevice {
                 "Failed to update GPU data for \"{}\" with error: {}",
                 self.gpu_info.uuid, e
             );
+            e.chain().for_each(|e| {
+                debug!("Error chain: {}", e);
+            });
         }
 
         self.gpu_vendor_data.clone()
@@ -369,6 +403,9 @@ impl GpuDevice for NvidiaDevice {
                 "Failed to update GPU data for \"{}\" with error: {}",
                 self.gpu_info.uuid, e
             );
+            e.chain().for_each(|e| {
+                debug!("Error chain: {}", e);
+            });
         }
 
         self.gpu_data.clone()

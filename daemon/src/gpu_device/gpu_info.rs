@@ -10,10 +10,10 @@ pub enum GpuVendorInfo {
         cuda_core_count: u32,
 
         // GPU temperature threshold
-        max_temp: u32,
-        mem_max_temp: u32,
-        slowdown_temp: u32,
-        shutdown_temp: u32,
+        max_temp: Option<u32>,
+        mem_max_temp: Option<u32>,
+        slowdown_temp: Option<u32>,
+        shutdown_temp: Option<u32>,
     },
     AMD {
         // TODO: AMD vendor info

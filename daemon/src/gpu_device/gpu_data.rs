@@ -4,11 +4,14 @@
 #[derive(Debug, Clone)]
 pub enum GpuVendorData {
     Nvidia {
-        sm_freq: u32,
-        video_freq: u32,
+        sm_freq: Option<u32>,
+        video_freq: Option<u32>,
 
-        sm_boost_freq: u32,
-        video_boost_freq: u32,
+        // Core and memory max boost frequency
+        graphics_boost_freq: Option<u32>,
+        mem_boost_freq: Option<u32>,
+        sm_boost_freq: Option<u32>,
+        video_boost_freq: Option<u32>,
     },
     AMD {
         // TODO: AMD vendor data
@@ -23,10 +26,6 @@ pub struct GpuData {
     // Core and memory current frequency
     pub graphics_freq: u32,
     pub mem_freq: u32,
-
-    // Core and memory max boost frequency
-    pub graphics_boost_freq: u32,
-    pub mem_boost_freq: u32,
 
     // Overclocking frequency offsets
     pub core_clock_offset: i32,
