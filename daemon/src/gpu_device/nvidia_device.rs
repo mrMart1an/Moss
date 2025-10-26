@@ -17,7 +17,8 @@ use tracing::{debug, warn};
 use crate::{
     fan_curve::{FanCurve, fan_mode::FanMode, linear_curve::LinearCurve},
     gpu_device::{
-        GpuDevice, GpuVendor,
+        DEFAULT_DATA_UPDATE_INTERVAL, GpuDevice,
+        GpuVendor,
         gpu_config::{GpuConfig, VendorConfig},
         gpu_data::{GpuData, GpuVendorData},
         gpu_info::{GpuInfo, GpuVendorInfo},
@@ -48,10 +49,6 @@ pub struct NvidiaDevice {
     fan_mode: FanMode,
     // Fan curve to apply in curve mode
     fan_curve: Box<dyn FanCurve + Send>,
-    // Fan update interval
-    fan_update_interval: Duration,
-    // Instant of the last fan update
-    fan_last_update: Instant,
 }
 
 impl NvidiaDevice {
@@ -108,13 +105,11 @@ impl NvidiaDevice {
             gpu_data,
             gpu_vendor_data,
 
-            gpu_data_update_interval: Duration::from_secs(1),
+            gpu_data_update_interval: DEFAULT_DATA_UPDATE_INTERVAL,
             gpu_data_last_update: Instant::now(),
 
             fan_mode,
             fan_curve,
-            fan_update_interval: Duration::from_secs(2),
-            fan_last_update: Instant::now(),
         })
     }
 
@@ -320,17 +315,8 @@ impl GpuDevice for NvidiaDevice {
 
         Ok(())
     }
-    // Change the fan speed update frequency
-    fn set_fan_update_interval(&mut self, update_interval: Duration) {
-        self.fan_update_interval = update_interval;
-    }
     // Update the fan speed according to the mode and the fan curve
     fn update_fan(&mut self) {
-        // Check if an update is necessary
-        if self.fan_last_update.elapsed() < self.fan_update_interval {
-            return;
-        }
-
         // Get the NVML device
         let mut device = if let Ok(dev) = self.get_device() {
             dev
@@ -341,12 +327,15 @@ impl GpuDevice for NvidiaDevice {
 
         match self.fan_mode {
             FanMode::Curve => {
+
                 // If the query for the temperature fail return
                 // 110 degrees for safety
                 let temp = device
                     .temperature(TemperatureSensor::Gpu)
                     .unwrap_or_else(|_| 110);
                 let fan_speed = self.fan_curve.get_speed(temp);
+
+                debug!("Updating fan: Mode Curve - Speed: {:?}%", fan_speed);
 
                 device
                     .set_fan_speed(0, fan_speed.get())
@@ -358,6 +347,8 @@ impl GpuDevice for NvidiaDevice {
                     });
             }
             FanMode::Manual(speed) => {
+                debug!("Updating fan: Mode Manual - Speed: {:?}%", speed);
+
                 device.set_fan_speed(0, speed.get()).unwrap_or_else(|e| {
                     warn!(
                         "Failed to set fan speed for device \"{}\": {}",
@@ -365,7 +356,9 @@ impl GpuDevice for NvidiaDevice {
                     )
                 });
             }
-            _ => {}
+            _ => {
+                debug!("Updating fan: Mode Auto")
+            }
         }
     }
 

@@ -8,6 +8,10 @@ use std::time::Duration;
 
 use anyhow::Result;
 
+// Default update intervals
+pub const DEFAULT_DATA_UPDATE_INTERVAL: Duration = Duration::from_secs(1);
+pub const DEFAULT_FAN_UPDATE_INTERVAL: Duration = Duration::from_secs(2);
+
 use crate::{
     fan_curve::{FanCurve, fan_mode::FanMode},
     gpu_device::{
@@ -33,8 +37,6 @@ pub trait GpuDevice {
     // Set the device fan mode, if no fan curve was previously set
     // default to a 100% fan speed curve
     fn set_fan_mode(&mut self, fan_mode: FanMode) -> Result<()>;
-    // Change the fan speed update interval
-    fn set_fan_update_interval(&mut self, update_interval: Duration);
     // Update the fan speed according to the mode and the fan curve
     // the default update frequency is 0.5 hertz
     fn update_fan(&mut self);
