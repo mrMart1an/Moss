@@ -4,20 +4,99 @@ use std::{
     time::{Duration, Instant},
 };
 
-use anyhow::Result;
+use anyhow::{Result, anyhow};
 use nvml_wrapper::Nvml;
-use tokio::{select, sync::mpsc::Sender};
+use tokio::{
+    select,
+    sync::{
+        mpsc::{Receiver, Sender},
+        oneshot,
+    },
+};
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
-use crate::gpu_device::{
-    DEFAULT_FAN_UPDATE_INTERVAL, GpuDevice, nvidia_device::NvidiaDevice,
+use crate::{
+    fan_curve::{FanCurve, fan_mode::FanMode},
+    gpu_device::{
+        DEFAULT_FAN_UPDATE_INTERVAL, GpuDevice,
+        gpu_config::GpuConfig,
+        gpu_data::{GpuData, GpuVendorData},
+        gpu_info::{GpuInfo, GpuVendorInfo},
+        nvidia_device::NvidiaDevice,
+    },
 };
 
-pub struct DevicesManager {
-    // Store NVML context for Nvidia GPUs
-    nvml: Option<Arc<Nvml>>,
+type Responder = oneshot::Sender<DevicesManagerAnswer>;
 
+pub enum DevicesManagerMessage {
+    // List all the devices managed by the devices manager
+    ListDevices {
+        tx: Responder,
+    },
+
+    // Get the device general informations
+    GetDeviceInfo {
+        uuid: String,
+        tx: Responder,
+    },
+    // Get the device vendor informations
+    GetDeviceVendorInfo {
+        uuid: String,
+        tx: Responder,
+    },
+
+    // Get the device general data
+    GetDeviceData {
+        uuid: String,
+        tx: Responder,
+    },
+    // Get the device vendor data
+    GetDeviceVendorData {
+        uuid: String,
+        tx: Responder,
+    },
+    // Set the data update interval for the device
+    SetDeviceDataUpdateInterval {
+        uuid: String,
+        interval: Duration,
+    },
+
+    // Set the device fan mode
+    SetDeviceFanMode {
+        uuid: String,
+        fan_mode: FanMode,
+    },
+    // Set the device fan curve
+    SetDeviceFanCurve {
+        uuid: String,
+        fan_curve: Box<dyn FanCurve + Send>,
+    },
+    // Set the fan update interval for the device
+    SetDeviceFanUpdateInterval {
+        uuid: String,
+        interval: Duration,
+    },
+
+    // Apply the given GPU configuration to the device
+    ApplyDeviceGpuConfig {
+        uuid: String,
+        config: GpuConfig,
+    },
+}
+
+#[derive(Debug)]
+pub enum DevicesManagerAnswer {
+    DeviceList(Vec<String>),
+
+    DeviceInfo(GpuInfo),
+    DeviceVendorInfo(GpuVendorInfo),
+
+    DeviceData(GpuData),
+    DeviceVendorData(GpuVendorData),
+}
+
+pub struct DevicesManager {
     devices: HashMap<String, Box<dyn GpuDevice + Send>>,
 
     // Store the fan update interval for all the devices
@@ -69,7 +148,6 @@ impl DevicesManager {
         }
 
         Self {
-            nvml,
             devices,
             fan_update_intervals,
             last_fan_updates,
@@ -79,7 +157,7 @@ impl DevicesManager {
     pub async fn run(
         &mut self,
         run_token: CancellationToken,
-        //        mut rx_message: Receiver<GpusManagerMessage>,
+        mut rx_message: Receiver<DevicesManagerMessage>,
         tx_err: Sender<anyhow::Error>,
     ) {
         let (mut next_fan_update_device, mut next_fan_update_time) =
@@ -92,13 +170,13 @@ impl DevicesManager {
 
                     break;
                 },
-                //message = rx_message.recv() => {
-                //    if let Err(err) = self.parse_message(message) {
-                //        tx_err.send(err).await.unwrap_or_else(|err| {
-                //            error!("Failed to send error over channel: {err}");
-                //        });
-                //    }
-                //}
+                message = rx_message.recv() => {
+                    if let Err(err) = self.parse_message(message) {
+                        tx_err.send(err).await.unwrap_or_else(|err| {
+                            error!("Failed to send error over channel: {err}");
+                        });
+                    }
+                },
                 // Update the fan and schedule the next update
                 _ = tokio::time::sleep(next_fan_update_time) => {
                     self.update_fans(&next_fan_update_device);
@@ -130,6 +208,111 @@ impl DevicesManager {
 
             // Add the device to the hash map
             devices_map.insert(uuid, device);
+        }
+
+        Ok(())
+    }
+
+    // Parse and eventually answer to incoming messages
+    fn parse_message(
+        &mut self,
+        message: Option<DevicesManagerMessage>,
+    ) -> Result<()> {
+        if message.is_none() {
+            warn!("GPUs manager: parsing empty message");
+            return Ok(());
+        }
+
+        match message.unwrap() {
+            DevicesManagerMessage::ListDevices { tx } => {
+                let mut devices_list = Vec::new();
+
+                for (uuid, _) in self.devices.iter() {
+                    devices_list.push(uuid.clone());
+                }
+
+                let answer = DevicesManagerAnswer::DeviceList(devices_list);
+                tx.send(answer).map_err(|v| anyhow!("{v:?}"))?
+            }
+
+            DevicesManagerMessage::GetDeviceInfo { uuid, tx } => {
+                let device = self.devices.get(&uuid).ok_or_else(|| {
+                    anyhow!("Trying to access non-existing device")
+                })?;
+
+                let answer =
+                    DevicesManagerAnswer::DeviceInfo(device.get_info());
+                tx.send(answer).map_err(|v| anyhow!("{v:?}"))?
+            }
+            DevicesManagerMessage::GetDeviceVendorInfo { uuid, tx } => {
+                let device = self.devices.get(&uuid).ok_or_else(|| {
+                    anyhow!("Trying to access non-existing device")
+                })?;
+
+                let answer = DevicesManagerAnswer::DeviceVendorInfo(
+                    device.get_vendor_info(),
+                );
+                tx.send(answer).map_err(|v| anyhow!("{v:?}"))?
+            }
+
+            DevicesManagerMessage::GetDeviceData { uuid, tx } => {
+                let device = self.devices.get_mut(&uuid).ok_or_else(|| {
+                    anyhow!("Trying to access non-existing device")
+                })?;
+
+                let answer =
+                    DevicesManagerAnswer::DeviceData(device.get_data());
+                tx.send(answer).map_err(|v| anyhow!("{v:?}"))?
+            }
+            DevicesManagerMessage::GetDeviceVendorData { uuid, tx } => {
+                let device = self.devices.get_mut(&uuid).ok_or_else(|| {
+                    anyhow!("Trying to access non-existing device")
+                })?;
+
+                let answer = DevicesManagerAnswer::DeviceVendorData(
+                    device.get_vendor_data(),
+                );
+                tx.send(answer).map_err(|v| anyhow!("{v:?}"))?
+            }
+            DevicesManagerMessage::SetDeviceDataUpdateInterval {
+                uuid,
+                interval,
+            } => {
+                let device = self.devices.get_mut(&uuid).ok_or_else(|| {
+                    anyhow!("Trying to access non-existing device")
+                })?;
+
+                device.set_data_update_interval(interval);
+            }
+
+            DevicesManagerMessage::SetDeviceFanMode { uuid, fan_mode } => {
+                let device = self.devices.get_mut(&uuid).ok_or_else(|| {
+                    anyhow!("Trying to access non-existing device")
+                })?;
+
+                device.set_fan_mode(fan_mode)?;
+            }
+            DevicesManagerMessage::SetDeviceFanCurve { uuid, fan_curve } => {
+                let device = self.devices.get_mut(&uuid).ok_or_else(|| {
+                    anyhow!("Trying to access non-existing device")
+                })?;
+
+                device.set_fan_curve(fan_curve);
+            }
+            DevicesManagerMessage::SetDeviceFanUpdateInterval {
+                uuid,
+                interval,
+            } => {
+                self.fan_update_intervals.insert(uuid, interval);
+            }
+
+            DevicesManagerMessage::ApplyDeviceGpuConfig { uuid, config } => {
+                let device = self.devices.get_mut(&uuid).ok_or_else(|| {
+                    anyhow!("Trying to access non-existing device")
+                })?;
+
+                device.apply_gpu_config(config)?;
+            }
         }
 
         Ok(())

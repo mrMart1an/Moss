@@ -38,22 +38,21 @@ pub trait GpuDevice {
     // default to a 100% fan speed curve
     fn set_fan_mode(&mut self, fan_mode: FanMode) -> Result<()>;
     // Update the fan speed according to the mode and the fan curve
-    // the default update frequency is 0.5 hertz
     fn update_fan(&mut self);
 
     // Return the device vendor specific information
     fn get_vendor_info(&self) -> GpuVendorInfo;
     // Return the device general information
-    fn get_gpu_info(&self) -> GpuInfo;
+    fn get_info(&self) -> GpuInfo;
 
     // Return the device vendor specific real time data,
     // the update frequency is controlled by the set_update_freq function,
     // the default update frequency is 1 hertz
     fn get_vendor_data(&mut self) -> GpuVendorData;
     // Return the device general real time data
-    // the update frequency is controlled by the set_update_freq function,
-    // the default update frequency is 1 hertz
-    fn get_gpu_data(&mut self) -> GpuData;
+    // the update frequency is controlled by the set_data_update_interval
+    // function, the default update frequency is 1 hertz
+    fn get_data(&mut self) -> GpuData;
     // Change the vendor and general data update interval
     fn set_data_update_interval(&mut self, update_interval: Duration);
 

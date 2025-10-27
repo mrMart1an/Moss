@@ -34,7 +34,7 @@ async fn main() -> Result<()> {
     //}
 
     // Start the GPUs manager
-    //let (tx_gpus_manager, rx_gpus_manager) = mpsc::channel(16);
+    let (tx_gpus_manager, rx_gpus_manager) = mpsc::channel(16);
     {
         let token = token.clone();
         let tx_err = tx_err.clone();
@@ -42,7 +42,7 @@ async fn main() -> Result<()> {
 
         tracker.spawn(async move {
             let mut devices_manager = DevicesManager::new();
-            devices_manager.run(token, tx_err).await;
+            devices_manager.run(token, rx_gpus_manager, tx_err).await;
         });
     }
 

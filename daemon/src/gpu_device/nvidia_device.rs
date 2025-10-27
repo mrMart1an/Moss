@@ -367,7 +367,7 @@ impl GpuDevice for NvidiaDevice {
         self.gpu_vendor_info.clone()
     }
     // Return the device general information
-    fn get_gpu_info(&self) -> GpuInfo {
+    fn get_info(&self) -> GpuInfo {
         self.gpu_info.clone()
     }
 
@@ -390,7 +390,7 @@ impl GpuDevice for NvidiaDevice {
     // Return the device general real time data
     // the update frequency is controlled by the set_update_freq function,
     // the default update frequency is 1 hertz
-    fn get_gpu_data(&mut self) -> GpuData {
+    fn get_data(&mut self) -> GpuData {
         if let Err(e) = self.udpate_data() {
             warn!(
                 "Failed to update GPU data for \"{}\" with error: {}",
