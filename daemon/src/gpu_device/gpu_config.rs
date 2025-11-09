@@ -1,21 +1,15 @@
 // Vendor specific configuration
-pub enum VendorConfig {
-    Nvidia {
-        core_clock_offset: i32,
-        mem_clock_offset: i32,
-    },
-    AMD {
-        // TODO: AMD GPU config
-    },
-    Intel {
-        // TODO: Intel GPU config
-    },
+#[derive(Debug, Default, Clone, Copy)]
+pub struct NvidiaConfig {
+    pub core_clock_offset: Option<i32>,
+    pub mem_clock_offset: Option<i32>,
 }
 
 // General configuration
+#[derive(Debug, Default, Clone)]
 pub struct GpuConfig {
-    pub vendor_config: VendorConfig,
+    pub nvidia_config: NvidiaConfig,
 
     // GPU power limit
-    pub power_limit: u32,
+    pub power_limit: Option<u32>,
 }

@@ -1,5 +1,6 @@
 {
-    "fan_curves": [],
+    "gpus": [],
     "profiles": [],
-    "gpus": []
+    "fan_curves": [],
+    "configs": []
 }

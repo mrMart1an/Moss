@@ -19,7 +19,7 @@ use crate::{
     gpu_device::{
         DEFAULT_DATA_UPDATE_INTERVAL, GpuDevice,
         GpuVendor,
-        gpu_config::{GpuConfig, VendorConfig},
+        gpu_config::GpuConfig,
         gpu_data::{GpuData, GpuVendorData},
         gpu_info::{GpuInfo, GpuVendorInfo},
     },
@@ -92,7 +92,7 @@ impl NvidiaDevice {
         };
 
         // Generate a default fan curve always at 100% fan speed
-        let mut fan_curve = Box::new(LinearCurve::new());
+        let mut fan_curve = Box::new(LinearCurve::new(&Vec::new()));
         fan_curve.add_point((0, 100).into());
 
         Ok(Self {
@@ -332,13 +332,13 @@ impl GpuDevice for NvidiaDevice {
                 // 110 degrees for safety
                 let temp = device
                     .temperature(TemperatureSensor::Gpu)
-                    .unwrap_or_else(|_| 110);
+                    .unwrap_or_else(|_| 110) as i32;
                 let fan_speed = self.fan_curve.get_speed(temp);
 
                 debug!("Updating fan: Mode Curve - Speed: {:?}%", fan_speed);
 
                 device
-                    .set_fan_speed(0, fan_speed.get())
+                    .set_fan_speed(0, fan_speed as u32)
                     .unwrap_or_else(|e| {
                         warn!(
                             "Failed to set fan speed for device \"{}\": {}",
@@ -349,7 +349,7 @@ impl GpuDevice for NvidiaDevice {
             FanMode::Manual(speed) => {
                 debug!("Updating fan: Mode Manual - Speed: {:?}%", speed);
 
-                device.set_fan_speed(0, speed.get()).unwrap_or_else(|e| {
+                device.set_fan_speed(0, speed as u32).unwrap_or_else(|e| {
                     warn!(
                         "Failed to set fan speed for device \"{}\": {}",
                         self.uuid, e
@@ -415,20 +415,16 @@ impl GpuDevice for NvidiaDevice {
         let mut device = self.get_device()?;
 
         // Set the power limit
-        device.set_power_management_limit(gpu_config.power_limit)?;
+        if let Some(power_limit) = gpu_config.power_limit {
+            device.set_power_management_limit(power_limit)?;
+        }
 
         // Set vendor specific config
-        match gpu_config.vendor_config {
-            VendorConfig::Nvidia {
-                core_clock_offset,
-                mem_clock_offset,
-            } => {
-                device.set_gpc_clock_vf_offset(core_clock_offset)?;
-                device.set_mem_clock_vf_offset(mem_clock_offset)?;
-            }
-            _ => {
-                warn!("Mismatched vendor config provided")
-            }
+        if let Some(offset) = gpu_config.nvidia_config.core_clock_offset {
+            device.set_gpc_clock_vf_offset(offset)?;
+        }
+        if let Some(offset) = gpu_config.nvidia_config.mem_clock_offset {
+            device.set_mem_clock_vf_offset(offset)?;
         }
 
         Ok(())

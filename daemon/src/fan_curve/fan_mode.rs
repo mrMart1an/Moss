@@ -1,10 +1,9 @@
-use crate::fan_curve::FanSpeed;
-
 // Device fan mode
+#[derive(Debug, Clone, Copy)]
 pub enum FanMode {
     Auto,
     Curve,
 
-    Manual(FanSpeed),
+    Manual(u8),
 }
 
