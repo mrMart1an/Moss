@@ -448,7 +448,7 @@ impl ConfigManager {
         };
 
         tx.send(answer).map_err(|_| ConfigError::TxError {
-            reason: format!("Failed to send answer on oneshot channel")
+            reason: format!("Failed to send answer on oneshot channel"),
         })?;
 
         Ok(())
@@ -496,12 +496,11 @@ impl ConfigManager {
         let buf = BufReader::new(file);
 
         // Parse the Json data
-        let config_json: Value = serde_json::from_reader(buf).map_err(|e| {
-            ConfigError::Json {
+        let config_json: Value =
+            serde_json::from_reader(buf).map_err(|e| ConfigError::Json {
                 reason: format!("Failed to load Json configuration file"),
                 error: e.into(),
-            }
-        })?;
+            })?;
 
         // Parse all of the GPU configurations entries
         if let Value::Array(gpus) = config_json[GPUS_JSON].clone() {
@@ -729,7 +728,12 @@ impl TryFrom<FanModeJson> for FanMode {
         // Convert the fan mode
         let auto = value.auto.unwrap_or(false);
         let curve = value.curve.unwrap_or(false);
-        let manual = value.curve.unwrap_or(false);
+        let manual = value.manual.unwrap_or(false);
+
+        trace!(
+            "parsing fan mode: (auto: {}), (curve: {}), (manual: {})",
+            auto, curve, manual
+        );
 
         let fan_mode = if auto && !curve && !manual {
             FanMode::Auto

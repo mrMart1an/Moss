@@ -1,8 +1,9 @@
 use anyhow::Result;
 use mossd::{
     arg_parser::ArgsOptions, config_manager::ConfigManager, devices_manager::DevicesManager, logger};
-use tokio::{signal::ctrl_c, sync::mpsc};
+use tokio::{select, signal::ctrl_c, sync::mpsc};
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
+use tracing::error;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -17,7 +18,7 @@ async fn main() -> Result<()> {
 
     // Use thin channel to move errors to the state task
     // to later transmit then to the D-Bus
-    let (tx_err, rx_err) = mpsc::channel(16);
+    let (tx_err, mut rx_err) = mpsc::channel(16);
 
     // Start the configuration manager
     let (tx_config_manager, rx_config_manager) = mpsc::channel(16);
@@ -92,7 +93,14 @@ async fn main() -> Result<()> {
     //}
 
     // TODO: Handle different unix signal for graceful termination
-    ctrl_c().await?;
+    select! {
+        _ = ctrl_c() => {
+
+        },
+        err = rx_err.recv() => {
+            error!("{:?}", err);
+        }
+    }
 
     // Cancel the token to communicate the program
     // termination to the running tasks
