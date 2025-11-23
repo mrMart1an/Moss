@@ -391,7 +391,7 @@ impl GpuDevice for NvidiaDevice {
                         ),
                         error: e.into(),
                     }
-                });
+                })?;
             }
             FanMode::Manual(speed) => {
                 debug!("Updating fan: Mode Manual - Speed: {:?}%", speed);
@@ -404,7 +404,7 @@ impl GpuDevice for NvidiaDevice {
                         ),
                         error: e.into(),
                     }
-                });
+                })?;
             }
             _ => {
                 debug!("Updating fan: Mode Auto")
