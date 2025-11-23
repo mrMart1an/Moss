@@ -1,3 +1,4 @@
+use anyhow::anyhow;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
@@ -6,8 +7,8 @@ use std::{
     io::BufReader,
     path::{Path, PathBuf},
 };
+use thiserror::Error;
 
-use anyhow::{Context, Ok, Result, anyhow};
 use serde_json::{Value, json};
 use tokio::{
     select,
@@ -21,6 +22,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, trace, warn};
 
 use crate::{
+    errors::MossdError,
     fan_curve::{fan_curve_info::FanCurveInfo, fan_mode::FanMode},
     gpu_device::gpu_config::{GpuConfig, NvidiaConfig},
 };
@@ -31,6 +33,31 @@ const GPUS_JSON: &str = "gpus";
 const FAN_CURVES_JSON: &str = "fan_curves";
 const PROFILES_JSON: &str = "profiles";
 const CONFIGS_JSON: &str = "configs";
+
+// Alias the result type for this module
+type Result<T> = std::result::Result<T, ConfigError>;
+
+// Configuration errors enum
+#[derive(Debug, Error)]
+pub enum ConfigError {
+    #[error("Configuration IO error: ({file}) {reason} - {error}")]
+    IO {
+        file: PathBuf,
+        reason: String,
+        error: anyhow::Error,
+    },
+    #[error("Configuration Json error: {reason} - {error}")]
+    Json {
+        reason: String,
+        error: anyhow::Error,
+    },
+    #[error("Configuration set error: {reason}")]
+    Set { reason: String },
+    #[error("Configuration get error: {reason}")]
+    Get { reason: String },
+    #[error("Configuration TX error: {reason}")]
+    TxError { reason: String },
+}
 
 // Store the answer to the configuration request
 #[derive(Debug)]
@@ -187,13 +214,13 @@ impl ConfigManager {
         &mut self,
         run_token: CancellationToken,
         mut rx_message: Receiver<ConfigMessage>,
-        tx_err: Sender<anyhow::Error>,
+        tx_err: Sender<MossdError>,
     ) {
         info!("Config manager: Running");
 
         // Parse the config file specified at creation time
         if let Err(err) = self.parse_config_file() {
-            tx_err.send(err).await.unwrap_or_else(|err| {
+            tx_err.send(err.into()).await.unwrap_or_else(|err| {
                 error!("Failed to send error over channel: {err}");
             });
         }
@@ -212,7 +239,7 @@ impl ConfigManager {
                 },
                 message = rx_message.recv() => {
                     if let Err(err) = self.parse_message(message) {
-                        tx_err.send(err).await.unwrap_or_else(|err| {
+                        tx_err.send(err.into()).await.unwrap_or_else(|err| {
                             error!("Failed to send error over channel: {err}");
                         });
                     }
@@ -288,7 +315,9 @@ impl ConfigManager {
         match message {
             ConfigMessage::SetProfileFanMode { profile, mode } => {
                 if profile == DEFAULT_PROFILE_NAME {
-                    return Err(anyhow!("Can't modify default profile"));
+                    return Err(ConfigError::Set {
+                        reason: format!("Can't modify default profile"),
+                    });
                 }
 
                 let profile_data = self.profile_datas.get_mut(&profile);
@@ -308,7 +337,9 @@ impl ConfigManager {
                 curve_name,
             } => {
                 if profile == DEFAULT_PROFILE_NAME {
-                    return Err(anyhow!("Can't modify default profile"));
+                    return Err(ConfigError::Set {
+                        reason: format!("Can't modify default profile"),
+                    });
                 }
 
                 let profile_data = self.profile_datas.get_mut(&profile);
@@ -328,7 +359,9 @@ impl ConfigManager {
                 config_name,
             } => {
                 if profile == DEFAULT_PROFILE_NAME {
-                    return Err(anyhow!("Can't modify default profile"));
+                    return Err(ConfigError::Set {
+                        reason: format!("Can't modify default profile"),
+                    });
                 }
 
                 let profile_data = self.profile_datas.get_mut(&profile);
@@ -352,7 +385,10 @@ impl ConfigManager {
                     self.fan_curve_datas.insert(curve_name, curve);
                 };
             }
-            ConfigMessage::SetConfig { config_name, config } => {
+            ConfigMessage::SetConfig {
+                config_name,
+                config,
+            } => {
                 if let Some(config_data) =
                     self.config_datas.get_mut(&config_name)
                 {
@@ -362,7 +398,9 @@ impl ConfigManager {
                 };
             }
             _ => {
-                return Err(anyhow!("Trying to parse unknow set message"));
+                return Err(ConfigError::Set {
+                    reason: format!("Trying to parse unknow set message"),
+                });
             }
         }
 
@@ -403,12 +441,15 @@ impl ConfigManager {
             }
 
             _ => {
-                return Err(anyhow!("Trying to parse unknow get message"));
+                return Err(ConfigError::Get {
+                    reason: format!("Trying to parse unknow get message"),
+                });
             }
         };
 
-        tx.send(answer)
-            .map_err(|v| anyhow!("Failed to send answer to channel: {v:?}"))?;
+        tx.send(answer).map_err(|_| ConfigError::TxError {
+            reason: format!("Failed to send answer on oneshot channel")
+        })?;
 
         Ok(())
     }
@@ -420,14 +461,18 @@ impl ConfigManager {
             if let Some(profile) = self.profile_datas.get(&data.profile) {
                 profile
             } else {
-                self.profile_datas
-                    .get(DEFAULT_PROFILE_NAME)
-                    .ok_or_else(|| anyhow!("Failed to fetch default profile"))?
+                self.profile_datas.get(DEFAULT_PROFILE_NAME).ok_or_else(
+                    || ConfigError::Get {
+                        reason: format!("Failed to fetch default profile"),
+                    },
+                )?
             }
         } else {
             self.profile_datas
                 .get(DEFAULT_PROFILE_NAME)
-                .ok_or_else(|| anyhow!("Failed to fetch default profile"))?
+                .ok_or_else(|| ConfigError::Get {
+                    reason: format!("Failed to fetch default profile"),
+                })?
         };
 
         Ok(profile)
@@ -441,14 +486,22 @@ impl ConfigManager {
             .insert(DEFAULT_PROFILE_NAME.to_string(), ProfileData::default());
 
         // Read the file to a string
-        let file = File::open(&self.config_path)
-            .with_context(|| "Failed to open Json configuration file")?;
+        let file =
+            File::open(&self.config_path).map_err(|e| ConfigError::IO {
+                file: self.config_path.clone(),
+                reason: format!("Failed to open configuration file"),
+                error: e.into(),
+            })?;
 
         let buf = BufReader::new(file);
 
         // Parse the Json data
-        let config_json: Value = serde_json::from_reader(buf)
-            .with_context(|| "Failed to parse Json configuration file")?;
+        let config_json: Value = serde_json::from_reader(buf).map_err(|e| {
+            ConfigError::Json {
+                reason: format!("Failed to load Json configuration file"),
+                error: e.into(),
+            }
+        })?;
 
         // Parse all of the GPU configurations entries
         if let Value::Array(gpus) = config_json[GPUS_JSON].clone() {
@@ -533,10 +586,21 @@ impl ConfigManager {
         });
 
         // Save the Json object in the configuration file
-        let file = File::create(&self.config_path)
-            .with_context(|| "Failed to open configuration file for writing")?;
-        serde_json::to_writer_pretty(file, &config_json)
-            .with_context(|| "Failed to write to the configuration file")?;
+        let file =
+            File::create(&self.config_path).map_err(|e| ConfigError::IO {
+                file: self.config_path.clone(),
+                reason: format!(
+                    "Failed to open configuration file for writing"
+                ),
+                error: e.into(),
+            })?;
+
+        serde_json::to_writer_pretty(file, &config_json).map_err(|e| {
+            ConfigError::Json {
+                reason: format!("Failed to write to the configuration file"),
+                error: e.into(),
+            }
+        })?;
 
         Ok(())
     }
@@ -544,7 +608,11 @@ impl ConfigManager {
     // Parse data relative to one profiles and add it to the
     // configuration manager hash map
     fn parse_profile(&mut self, profile_json: Value) -> Result<()> {
-        let profile: ProfileJson = serde_json::from_value(profile_json)?;
+        let profile: ProfileJson = serde_json::from_value(profile_json)
+            .map_err(|e| ConfigError::Json {
+                reason: format!("Failed to parse profile Json"),
+                error: e.into(),
+            })?;
 
         // If the profile is already in the config ignore it
         if self.profile_datas.contains_key(profile.name.as_str()) {
@@ -565,7 +633,11 @@ impl ConfigManager {
     // Parse data relative to one fan curve and add it to the
     // configuration manager hash map
     fn parse_fan_curve(&mut self, fan_curve_json: Value) -> Result<()> {
-        let fan_curve: FanCurveJson = serde_json::from_value(fan_curve_json)?;
+        let fan_curve: FanCurveJson = serde_json::from_value(fan_curve_json)
+            .map_err(|e| ConfigError::Json {
+                reason: format!("Failed to parse fan curve Json"),
+                error: e.into(),
+            })?;
 
         // If the fan curve is already in the config ignore it
         if self.fan_curve_datas.contains_key(fan_curve.name.as_str()) {
@@ -586,7 +658,12 @@ impl ConfigManager {
     // Parse data relative to one GPU and add it to the
     // configuration manager hash map
     fn parse_gpu(&mut self, gpu_json: Value) -> Result<()> {
-        let gpu: GpuData = serde_json::from_value(gpu_json)?;
+        let gpu: GpuData = serde_json::from_value(gpu_json).map_err(|e| {
+            ConfigError::Json {
+                reason: format!("Failed to parse GPU data Json"),
+                error: e.into(),
+            }
+        })?;
 
         // If the GPU is already in the config ignore it
         if self.gpu_datas.contains_key(gpu.uuid.as_str()) {
@@ -606,7 +683,13 @@ impl ConfigManager {
     // Parse data relative to one config and add it to the
     // configuration manager hash map
     fn parse_config(&mut self, config_json: Value) -> Result<()> {
-        let config: ConfigJson = serde_json::from_value(config_json)?;
+        let config: ConfigJson =
+            serde_json::from_value(config_json).map_err(|e| {
+                ConfigError::Json {
+                    reason: format!("Failed to parse config Json"),
+                    error: e.into(),
+                }
+            })?;
 
         // If the config is already in the config ignore it
         if self.config_datas.contains_key(config.name.as_str()) {
@@ -638,7 +721,7 @@ impl Default for ProfileData {
 // Try from implementations - From json to data
 
 impl TryFrom<FanModeJson> for FanMode {
-    type Error = anyhow::Error;
+    type Error = ConfigError;
 
     fn try_from(
         value: FanModeJson,
@@ -656,14 +739,22 @@ impl TryFrom<FanModeJson> for FanMode {
             let fan_speed = if let Some(speed) = value.manaul_speed {
                 speed.clamp(0, 100)
             } else {
-                return Err(anyhow!(
-                    "Invalid fan mode: no fan speed for manual mode"
-                ));
+                return Err(ConfigError::Json {
+                    reason: format!(
+                        "Invalid fan mode: no fan speed for manual mode"
+                    ),
+                    error: anyhow!(
+                        "Invalid fan mode: no fan speed for manual mode"
+                    ),
+                });
             };
 
             FanMode::Manual(fan_speed)
         } else {
-            return Err(anyhow!("Invalid fan mode"));
+            return Err(ConfigError::Json {
+                reason: format!("Invalid fan mode"),
+                error: anyhow!("Invalid fan mode"),
+            });
         };
 
         Ok(fan_mode)
@@ -671,7 +762,7 @@ impl TryFrom<FanModeJson> for FanMode {
 }
 
 impl TryFrom<NvidiaConfigJson> for NvidiaConfig {
-    type Error = anyhow::Error;
+    type Error = ConfigError;
 
     fn try_from(
         value: NvidiaConfigJson,
@@ -684,7 +775,7 @@ impl TryFrom<NvidiaConfigJson> for NvidiaConfig {
 }
 
 impl TryFrom<ProfileJson> for ProfileData {
-    type Error = anyhow::Error;
+    type Error = ConfigError;
 
     fn try_from(
         value: ProfileJson,
@@ -698,7 +789,7 @@ impl TryFrom<ProfileJson> for ProfileData {
 }
 
 impl TryFrom<FanCurveJson> for FanCurveInfo {
-    type Error = anyhow::Error;
+    type Error = ConfigError;
 
     fn try_from(
         value: FanCurveJson,
@@ -712,7 +803,7 @@ impl TryFrom<FanCurveJson> for FanCurveInfo {
 }
 
 impl TryFrom<ConfigJson> for GpuConfig {
-    type Error = anyhow::Error;
+    type Error = ConfigError;
 
     fn try_from(
         value: ConfigJson,
@@ -733,7 +824,7 @@ impl TryFrom<ConfigJson> for GpuConfig {
 // Try from implementation - From data to json
 
 impl TryFrom<NvidiaConfig> for NvidiaConfigJson {
-    type Error = anyhow::Error;
+    type Error = ConfigError;
 
     fn try_from(
         value: NvidiaConfig,
@@ -746,7 +837,7 @@ impl TryFrom<NvidiaConfig> for NvidiaConfigJson {
 }
 
 impl TryFrom<(&String, &GpuConfig)> for ConfigJson {
-    type Error = anyhow::Error;
+    type Error = ConfigError;
 
     fn try_from(
         value: (&String, &GpuConfig),
@@ -760,7 +851,7 @@ impl TryFrom<(&String, &GpuConfig)> for ConfigJson {
 }
 
 impl TryFrom<FanMode> for FanModeJson {
-    type Error = anyhow::Error;
+    type Error = ConfigError;
 
     fn try_from(
         value: FanMode,
@@ -781,7 +872,7 @@ impl TryFrom<FanMode> for FanModeJson {
 }
 
 impl TryFrom<(&String, &ProfileData)> for ProfileJson {
-    type Error = anyhow::Error;
+    type Error = ConfigError;
 
     fn try_from(
         value: (&String, &ProfileData),
@@ -796,7 +887,7 @@ impl TryFrom<(&String, &ProfileData)> for ProfileJson {
 }
 
 impl TryFrom<(&String, &FanCurveInfo)> for FanCurveJson {
-    type Error = anyhow::Error;
+    type Error = ConfigError;
 
     fn try_from(
         value: (&String, &FanCurveInfo),

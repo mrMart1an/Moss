@@ -1,6 +1,6 @@
 use anyhow::Result;
 use mossd::{
-    arg_parser::ArgsOptions, devices_manager::DevicesManager, logger};
+    arg_parser::ArgsOptions, config_manager::ConfigManager, devices_manager::DevicesManager, logger};
 use tokio::{signal::ctrl_c, sync::mpsc};
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
@@ -19,19 +19,19 @@ async fn main() -> Result<()> {
     // to later transmit then to the D-Bus
     let (tx_err, rx_err) = mpsc::channel(16);
 
-    //// Start the configuration manager
-    //let (tx_config_manager, rx_config_manager) = mpsc::channel(16);
-    //{
-    //    let token = token.clone();
-    //    let tx_err = tx_err.clone();
+    // Start the configuration manager
+    let (tx_config_manager, rx_config_manager) = mpsc::channel(16);
+    {
+        let token = token.clone();
+        let tx_err = tx_err.clone();
 
-    //    tracker.spawn(async move {
-    //        let mut config_manager =
-    //            ConfigManager::new(&args_options.config_file_path);
+        tracker.spawn(async move {
+            let mut config_manager =
+                ConfigManager::new(&args_options.config_file_path);
 
-    //        config_manager.run(token, rx_config_manager, tx_err).await;
-    //    });
-    //}
+            config_manager.run(token, rx_config_manager, tx_err).await;
+        });
+    }
 
     // Start the GPUs manager
     let (tx_gpus_manager, rx_gpus_manager) = mpsc::channel(16);
