@@ -6,6 +6,7 @@ use std::{
     fs::File,
     io::BufReader,
     path::{Path, PathBuf},
+    time::Duration,
 };
 use thiserror::Error;
 
@@ -24,7 +25,10 @@ use tracing::{debug, error, info, trace, warn};
 use crate::{
     errors::MossdError,
     fan_curve::{fan_curve_info::FanCurveInfo, fan_mode::FanMode},
-    gpu_device::gpu_config::{GpuConfig, NvidiaConfig},
+    gpu_device::{
+        DEFAULT_FAN_UPDATE_INTERVAL,
+        gpu_config::{GpuConfig, NvidiaConfig},
+    },
 };
 
 const DEFAULT_PROFILE_NAME: &str = "default";
@@ -64,6 +68,7 @@ pub enum ConfigError {
 pub enum ConfigMessageAnswer {
     FanMode(FanMode),
     FanCurve(Option<FanCurveInfo>),
+    FanUpdateInterval(Option<Duration>),
     Config(Option<GpuConfig>),
 }
 
@@ -90,6 +95,12 @@ pub enum ConfigMessage {
         uuid: String,
         tx: Responder,
     },
+    // Get the fan update interval for the given device
+    // Return None if the device doesn't exist in the configuration
+    GetFanUpdateInterval {
+        uuid: String,
+        tx: Responder,
+    },
 
     // Assign the given profile on the given device
     AssignProfile {
@@ -105,6 +116,10 @@ pub enum ConfigMessage {
     SetProfileFanCurve {
         profile: String,
         curve_name: Option<String>,
+    },
+    SetFanUpdateInterval {
+        profile: String,
+        update_intrerval: Duration,
     },
     // Set a config for a profile
     SetProfileConfig {
@@ -140,6 +155,7 @@ struct ProfileData {
     pub fan_mode: FanMode,
     pub fan_curve: Option<String>,
     pub config: Option<String>,
+    pub update_interval: Duration,
 }
 
 // Json data types for serialization
@@ -151,6 +167,7 @@ struct ProfileJson {
     pub fan_mode: FanModeJson,
     pub fan_curve: Option<String>,
     pub config: Option<String>,
+    pub update_interval: Option<f32>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, Default)]
@@ -258,6 +275,9 @@ impl ConfigManager {
                 ConfigMessage::GetFanCurve { uuid: _, tx: _ } => {
                     self.handle_get_message(message)?;
                 }
+                ConfigMessage::GetFanUpdateInterval { uuid: _, tx: _ } => {
+                    self.handle_get_message(message)?;
+                }
                 ConfigMessage::GetConfig { uuid: _, tx: _ } => {
                     self.handle_get_message(message)?;
                 }
@@ -277,6 +297,12 @@ impl ConfigManager {
                 ConfigMessage::SetProfileFanCurve {
                     profile: _,
                     curve_name: _,
+                } => {
+                    self.hadle_set_message(message)?;
+                }
+                ConfigMessage::SetFanUpdateInterval {
+                    profile: _,
+                    update_intrerval: _,
                 } => {
                     self.hadle_set_message(message)?;
                 }
@@ -354,6 +380,28 @@ impl ConfigManager {
                     self.profile_datas.insert(profile, new_profile);
                 }
             }
+            ConfigMessage::SetFanUpdateInterval {
+                profile,
+                update_intrerval,
+            } => {
+                if profile == DEFAULT_PROFILE_NAME {
+                    return Err(ConfigError::Set {
+                        reason: format!("Can't modify default profile"),
+                    });
+                }
+
+                let profile_data = self.profile_datas.get_mut(&profile);
+
+                if let Some(profile_data) = profile_data {
+                    profile_data.update_interval = update_intrerval;
+                } else {
+                    // Create e new profile if it doesn't already exist
+                    let mut new_profile = ProfileData::default();
+                    new_profile.update_interval = update_intrerval;
+
+                    self.profile_datas.insert(profile, new_profile);
+                }
+            }
             ConfigMessage::SetProfileConfig {
                 profile,
                 config_name,
@@ -427,6 +475,13 @@ impl ConfigManager {
                 let fan_mode = profile.fan_mode;
 
                 (tx, ConfigMessageAnswer::FanMode(fan_mode))
+            }
+            ConfigMessage::GetFanUpdateInterval { uuid, tx } => {
+                let profile = self.get_profile(&uuid)?;
+
+                let updata_interval = Some(profile.update_interval);
+
+                (tx, ConfigMessageAnswer::FanUpdateInterval(updata_interval))
             }
             ConfigMessage::GetConfig { uuid, tx } => {
                 let profile = self.get_profile(&uuid)?;
@@ -713,6 +768,7 @@ impl Default for ProfileData {
             fan_curve: None,
             config: None,
             fan_mode: FanMode::Auto,
+            update_interval: DEFAULT_FAN_UPDATE_INTERVAL,
         }
     }
 }
@@ -784,10 +840,17 @@ impl TryFrom<ProfileJson> for ProfileData {
     fn try_from(
         value: ProfileJson,
     ) -> std::result::Result<ProfileData, Self::Error> {
+        let update_interval = if let Some(interval) = value.update_interval {
+            Duration::from_secs_f32(interval)
+        } else {
+            DEFAULT_FAN_UPDATE_INTERVAL
+        };
+
         Ok(Self {
             fan_mode: value.fan_mode.try_into()?,
             fan_curve: value.fan_curve,
             config: value.config,
+            update_interval,
         })
     }
 }
@@ -886,6 +949,7 @@ impl TryFrom<(&String, &ProfileData)> for ProfileJson {
             fan_mode: value.1.fan_mode.try_into()?,
             fan_curve: value.1.fan_curve.clone(),
             config: value.1.config.clone(),
+            update_interval: Some(value.1.update_interval.as_secs_f32()),
         })
     }
 }
