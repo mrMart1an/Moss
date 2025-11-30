@@ -197,7 +197,7 @@ struct NvidiaConfigJson {
 struct ConfigJson {
     pub name: String,
 
-    pub power_limit: Option<u32>,
+    pub power_limit: Option<f32>,
     pub nvidia: Option<NvidiaConfigJson>,
 }
 
@@ -329,8 +329,6 @@ impl ConfigManager {
                     self.save_config()?;
                 }
             }
-        } else {
-            warn!("Attempting to parse empty message");
         }
 
         Ok(())
@@ -881,9 +879,15 @@ impl TryFrom<ConfigJson> for GpuConfig {
             NvidiaConfig::default()
         };
 
+        let power_limit = if let Some(limit) = value.power_limit {
+            Some((limit * 1000.0) as u32)
+        } else {
+            None
+        };
+
         Ok(Self {
             nvidia_config,
-            power_limit: value.power_limit,
+            power_limit,
         })
     }
 }
@@ -909,9 +913,15 @@ impl TryFrom<(&String, &GpuConfig)> for ConfigJson {
     fn try_from(
         value: (&String, &GpuConfig),
     ) -> std::result::Result<ConfigJson, Self::Error> {
+        let power_limit = if let Some(limit) = value.1.power_limit {
+            Some(limit as f32 / 1000.0)
+        } else {
+            None
+        };
+
         Ok(Self {
             name: value.0.clone(),
-            power_limit: value.1.power_limit,
+            power_limit,
             nvidia: Some(value.1.nvidia_config.try_into()?),
         })
     }

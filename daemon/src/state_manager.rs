@@ -1,7 +1,7 @@
-use std::sync::Arc;
+use std::time::Duration;
 
-use anyhow::{Error, Result, anyhow};
-use nvml_wrapper::Nvml;
+use anyhow::anyhow;
+use thiserror::Error;
 use tokio::{
     select,
     sync::{
@@ -11,60 +11,52 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 
-use tracing::{error, trace, warn};
+use tracing::{error, warn};
 
 use crate::{
     config_manager::{ConfigMessage, ConfigMessageAnswer},
-    dbus_service::{DBusServiceAnswer, DBusServiceMessage},
+    devices_manager::{DevicesManagerAnswer, DevicesManagerMessage},
+    errors::MossdError,
     fan_curve::{
-        hysteresis_curve::HysteresisCurve, linear_curve::LinearCurve, FanCurve
+        fan_curve_info::FanCurveInfo,
+        fan_mode::FanMode,
+        hysteresis_curve::HysteresisCurve,
+        linear_curve::LinearCurve,
     },
-    fan_manager::{FanMessage, FanMode},
-    gpus_manager::{GpusManagerAnswer, GpusManagerMessage},
+    gpu_device::gpu_config::GpuConfig,
 };
 
+type Result<T> = std::result::Result<T, StateManagerError>;
+
+#[derive(Debug, Error)]
+pub enum StateManagerError {
+    #[error("State manager TX error: {reason}")]
+    TX {
+        reason: String,
+        error: anyhow::Error,
+    },
+    #[error("State manager RX error: {reason}")]
+    RX {
+        reason: String,
+        error: anyhow::Error,
+    },
+    #[error("State manager invalid response error: {reason}")]
+    InvalidResponse { reason: String },
+}
+
 pub struct StateManager {
-    nvml: Arc<Nvml>,
-
-    gpu_uuids: Vec<String>,
-
-    rx_dbus_service: Receiver<DBusServiceMessage>,
-
-    tx_fan_manager: Sender<FanMessage>,
     tx_config_manager: Sender<ConfigMessage>,
-    tx_gpus_manager: Sender<GpusManagerMessage>,
+    tx_devices_manager: Sender<DevicesManagerMessage>,
 }
 
 impl StateManager {
     pub fn new(
-        nvml: Arc<Nvml>,
-        rx_dbus_service: Receiver<DBusServiceMessage>,
-
-        tx_fan_manager: Sender<FanMessage>,
         tx_config_manager: Sender<ConfigMessage>,
-        tx_gpus_manager: Sender<GpusManagerMessage>,
+        tx_devices_manager: Sender<DevicesManagerMessage>,
     ) -> Self {
-        // Find the UUIDs of the GPUs on the system
-        let gpu_uuids = match Self::find_gpus(&nvml) {
-            Ok(gpus) => gpus,
-            Err(err) => {
-                error!("{}", err);
-                Vec::new()
-            }
-        };
-
-        trace!("GPUs on current system: {:?}", gpu_uuids);
-
         Self {
-            nvml,
-
-            gpu_uuids,
-
-            rx_dbus_service,
-
-            tx_fan_manager,
             tx_config_manager,
-            tx_gpus_manager,
+            tx_devices_manager,
         }
     }
 
@@ -72,10 +64,12 @@ impl StateManager {
     pub async fn run(
         &mut self,
         run_token: CancellationToken,
-        mut rx_err: Receiver<Error>,
+        mut rx_err: Receiver<MossdError>,
     ) {
         // Load and apply the initial configuration
-        self.apply_config().await;
+        if let Err(e) = self.apply_settings().await {
+            self.parse_error(Some(e.into()));
+        }
 
         loop {
             select! {
@@ -85,187 +79,304 @@ impl StateManager {
                 err_message = rx_err.recv() => {
                     self.parse_error(err_message);
                 }
-                message = self.rx_dbus_service.recv() => {
-                    self.parse_dbus_message(message).await;
-                }
+                //message = self.rx_dbus_service.recv() => {
+                //    self.parse_dbus_message(message).await;
+                //}
             }
         }
     }
 
-    async fn parse_dbus_message(
-        &mut self,
-        message: Option<DBusServiceMessage>,
-    ) {
-        if let Some(message) = message {
-            let (tx, answer) = match message {
-                DBusServiceMessage::GetGpusUuid(tx) => {
-                    let uuids = self.gpu_uuids.clone();
-                    (Some(tx), Some(DBusServiceAnswer::GpusUuid(uuids)))
-                }
-                _ => { (None, None) }
-            };
+    //async fn parse_dbus_message(
+    //    &mut self,
+    //    message: Option<DBusServiceMessage>,
+    //) {
+    //    if let Some(message) = message {
+    //        let (tx, answer) = match message {
+    //            DBusServiceMessage::GetGpusUuid(tx) => {
+    //                let uuids = self.gpu_uuids.clone();
+    //                (Some(tx), Some(DBusServiceAnswer::GpusUuid(uuids)))
+    //            }
+    //            _ => { (None, None) }
+    //        };
 
-            // Send the message to channel if needed
-            if let (Some(tx), Some(answer)) = (tx, answer) {
-                if let Err(err) = tx.send(answer) {
-                    error!("{:?}", err);
-                }
-            }
-        }
-    }
+    //        // Send the message to channel if needed
+    //        if let (Some(tx), Some(answer)) = (tx, answer) {
+    //            if let Err(err) = tx.send(answer) {
+    //                error!("{:?}", err);
+    //            }
+    //        }
+    //    }
+    //}
 
     // Query the configuration manager about the current settings
-    // and applies them to the various system at start-up
-    async fn apply_config(&mut self) {
-        let uuids = self.gpu_uuids.clone();
+    // and applies them to the various devices at start-up
+    async fn apply_settings(&mut self) -> Result<()> {
+        // Get the UUIDs of the devices on the system
+        let (answer_tx, answer_rx) = oneshot::channel();
+
+        self.tx_devices_manager
+            .send(DevicesManagerMessage::ListDevices { tx: answer_tx })
+            .await
+            .map_err(|e| StateManagerError::TX {
+                reason: format!("Failed to send request to devices manager"),
+                error: anyhow!("{}", e),
+            })?;
+
+        let answer = answer_rx.await.map_err(|e| StateManagerError::RX {
+            reason: format!("Failed to receive answer form devices manager"),
+            error: e.into(),
+        })?;
+
+        let uuids = if let DevicesManagerAnswer::DeviceList(uuids_list) = answer
+        {
+            uuids_list
+        } else {
+            return Err(StateManagerError::InvalidResponse {
+                reason: format!("Invalid responce from devices manager"),
+            });
+        };
 
         // Request and apply the configuration information for every GPUs
         for uuid in uuids {
-            // Query the configuration manager
+            // Query the configuration manager for the fan curve
             let (tx, rx) = oneshot::channel();
-            let message = ConfigMessage::GetGpu {
+            let message = ConfigMessage::GetFanCurve {
                 uuid: uuid.clone(),
-                tx: tx,
+                tx,
             };
 
-            if let Err(err) = self.tx_config_manager.send(message).await {
-                error!("{}", err);
-
-                continue;
-            }
-
-            // Wait for an answer
-            if let Ok(answer) = rx.await {
-                if let ConfigMessageAnswer::Gpu(gpu) = answer {
-                    let profile = gpu.profile;
-
-                    if let Err(err) = self.apply_profile(&uuid, &profile).await
-                    {
-                        error!("{}", err);
-                        continue;
-                    }
-                } else {
-                    error!("Wrong answer recieved from config manager");
+            self.tx_config_manager.send(message).await.map_err(|e| {
+                StateManagerError::TX {
+                    reason: format!("Failed to send query to config manager"),
+                    error: anyhow!("{}", e),
                 }
-            }
-        }
-    }
+            })?;
 
-    async fn apply_profile(
-        &mut self,
-        uuid: &str,
-        profile_name: &str,
-    ) -> Result<()> {
-        // Query the configuration manager
-        let (tx, rx) = oneshot::channel();
-        let message = ConfigMessage::GetProfile {
-            name: profile_name.to_string(),
-            tx: tx,
-        };
+            let answer = rx.await.map_err(|e| StateManagerError::RX {
+                reason: format!("Failed to receive answer form config manager"),
+                error: e.into(),
+            })?;
 
-        self.tx_config_manager.send(message).await?;
+            let fan_curve_info =
+                if let ConfigMessageAnswer::FanCurve(data) = answer {
+                    data
+                } else {
+                    return Err(StateManagerError::InvalidResponse {
+                        reason: format!("Invalid responce from config manager"),
+                    });
+                };
 
-        // Wait for an answer
-        let answer = rx.await?;
+            // Apply the fan curve settings
+            self.apply_fan_curve(&uuid, fan_curve_info).await?;
 
-        if let ConfigMessageAnswer::Profile(profile) = answer {
-            // Applies the profile's fan curve to the GPU
-            let fan_curve = &profile.fan_curve;
-            self.apply_fan_config(uuid, fan_curve).await?;
+            // Query the configuration manager for the fan update interval
+            let (tx, rx) = oneshot::channel();
+            let message = ConfigMessage::GetFanUpdateInterval {
+                uuid: uuid.clone(),
+                tx,
+            };
 
-            // TODO: Apply overclock and power limit settings
+            self.tx_config_manager.send(message).await.map_err(|e| {
+                StateManagerError::TX {
+                    reason: format!("Failed to send query to config manager"),
+                    error: anyhow!("{}", e),
+                }
+            })?;
+
+            let answer = rx.await.map_err(|e| StateManagerError::RX {
+                reason: format!("Failed to receive answer form config manager"),
+                error: e.into(),
+            })?;
+
+            let update_interval =
+                if let ConfigMessageAnswer::FanUpdateInterval(data) = answer {
+                    data
+                } else {
+                    return Err(StateManagerError::InvalidResponse {
+                        reason: format!("Invalid responce from config manager"),
+                    });
+                };
+
+            // Apply the fan curve settings
+            self.apply_fan_update_interval(&uuid, update_interval)
+                .await?;
+
+            // Query the configuration manager for the fan mode
+            let (tx, rx) = oneshot::channel();
+            let message = ConfigMessage::GetFanMode {
+                uuid: uuid.clone(),
+                tx,
+            };
+
+            self.tx_config_manager.send(message).await.map_err(|e| {
+                StateManagerError::TX {
+                    reason: format!("Failed to send query to config manager"),
+                    error: anyhow!("{}", e),
+                }
+            })?;
+
+            let answer = rx.await.map_err(|e| StateManagerError::RX {
+                reason: format!("Failed to receive answer form config manager"),
+                error: e.into(),
+            })?;
+
+            let fan_mode = if let ConfigMessageAnswer::FanMode(data) = answer {
+                data
+            } else {
+                return Err(StateManagerError::InvalidResponse {
+                    reason: format!("Invalid responce from config manager"),
+                });
+            };
+
+            // Apply the fan mode
+            self.apply_fan_mode(&uuid, fan_mode).await?;
+
+            // Query the configuration manager for the fan update interval
+            let (tx, rx) = oneshot::channel();
+            let message = ConfigMessage::GetConfig {
+                uuid: uuid.clone(),
+                tx,
+            };
+
+            self.tx_config_manager.send(message).await.map_err(|e| {
+                StateManagerError::TX {
+                    reason: format!("Failed to send query to config manager"),
+                    error: anyhow!("{}", e),
+                }
+            })?;
+
+            let answer = rx.await.map_err(|e| StateManagerError::RX {
+                reason: format!("Failed to receive answer form config manager"),
+                error: e.into(),
+            })?;
+
+            let config = if let ConfigMessageAnswer::Config(data) = answer {
+                data
+            } else {
+                return Err(StateManagerError::InvalidResponse {
+                    reason: format!("Invalid responce from config manager"),
+                });
+            };
+
+            // Apply the fan curve settings
+            self.apply_config(&uuid, config).await?;
         }
 
         Ok(())
     }
 
-    // Apply the fan curve config in the
-    async fn apply_fan_config(
+    async fn apply_fan_mode(
         &mut self,
         uuid: &str,
-        curve_name: &str,
+        fan_mode: FanMode,
     ) -> Result<()> {
-        // Query the configuration manager
-        let (tx, rx) = oneshot::channel();
-        let message = ConfigMessage::GetFanCurve {
-            name: curve_name.to_string(),
-            tx: tx,
+        let message = DevicesManagerMessage::SetDeviceFanMode {
+            uuid: uuid.to_string(),
+            fan_mode,
         };
 
-        self.tx_config_manager.send(message).await?;
-
-        // Wait for an answer
-        let answer = rx.await?;
-
-        if let ConfigMessageAnswer::FanCurve(curve) = answer {
-            let mut new_curve = Box::new(HysteresisCurve::new(
-                LinearCurve::new(),
-                curve.hysteresis_down,
-                curve.hysteresis_up,
-            ));
-
-            for point in curve.points {
-                new_curve.add_point(point.into());
+        self.tx_devices_manager.send(message).await.map_err(|e| {
+            StateManagerError::TX {
+                reason: format!("Failed to send request to devices manager"),
+                error: anyhow!("{}", e),
             }
+        })?;
 
-            // Send the curve to the fan manager
-            let message = FanMessage::UpdateCurve {
-                uuid: uuid.to_string(),
-                new_curve,
-            };
-
-            self.tx_fan_manager
-                .send(message)
-                .await
-                .map_err(|err| anyhow!("{err}"))?;
-
-            // Set the fan mode according to the configuration
-            let message = if curve.manual {
-                FanMessage::SetMode {
-                    uuid: uuid.to_string(),
-                    mode: FanMode::Manual,
-                }
-            } else {
-                FanMessage::SetMode {
-                    uuid: uuid.to_string(),
-                    mode: FanMode::Auto,
-                }
-            };
-
-            self.tx_fan_manager
-                .send(message)
-                .await
-                .map_err(|err| anyhow!("{err}"))?;
-
-            Ok(())
-        } else {
-            Err(anyhow!("Wrong answer recieved from config manager"))
-        }
+        Ok(())
     }
 
-    // Return a vector of string representing the UUIDs
-    // of all of the GPUs on the system
-    fn find_gpus(nvml: &Arc<Nvml>) -> Result<Vec<String>> {
-        let gpu_count = nvml.device_count()?;
-        let mut gpu_uuids = Vec::with_capacity(gpu_count as usize);
+    // Apply the fan curve to the device
+    async fn apply_fan_curve(
+        &mut self,
+        uuid: &str,
+        curve_info_opt: Option<FanCurveInfo>,
+    ) -> Result<()> {
+        // Only apply fan curve settings if the config manager
+        // returned fan curve info
+        if let Some(fan_curve_info) = curve_info_opt {
+            // Generate the actual fan curve to
+            // then pass to the devices manager
+            let fan_curve = Box::new(
+                HysteresisCurve::<LinearCurve>::from_info(&fan_curve_info),
+            );
 
-        for i in 0..gpu_count {
-            let device = nvml.device_by_index(i)?;
-            let uuid = device.uuid()?;
+            let message = DevicesManagerMessage::SetDeviceFanCurve {
+                uuid: uuid.to_string(),
+                fan_curve,
+            };
 
-            gpu_uuids.push(uuid);
+            self.tx_devices_manager.send(message).await.map_err(|e| {
+                StateManagerError::TX {
+                    reason: format!(
+                        "Failed to send request to devices manager"
+                    ),
+                    error: anyhow!("{}", e),
+                }
+            })?;
         }
 
-        Ok(gpu_uuids)
+        Ok(())
+    }
+
+    async fn apply_fan_update_interval(
+        &mut self,
+        uuid: &str,
+        update_interval_opt: Option<Duration>,
+    ) -> Result<()> {
+        // Only apply fan update interval settings if the config manager
+        // returned a duration value
+        if let Some(interval) = update_interval_opt {
+            let message = DevicesManagerMessage::SetDeviceFanUpdateInterval {
+                uuid: uuid.to_string(),
+                interval,
+            };
+
+            self.tx_devices_manager.send(message).await.map_err(|e| {
+                StateManagerError::TX {
+                    reason: format!(
+                        "Failed to send request to devices manager"
+                    ),
+                    error: anyhow!("{}", e),
+                }
+            })?;
+        }
+
+        Ok(())
+    }
+
+    async fn apply_config(
+        &mut self,
+        uuid: &str,
+        config_opt: Option<GpuConfig>,
+    ) -> Result<()> {
+        // Only apply config settings if the config manager
+        // returned a config profile
+        if let Some(config) = config_opt {
+            let message = DevicesManagerMessage::ApplyDeviceGpuConfig {
+                uuid: uuid.to_string(),
+                config,
+            };
+
+            self.tx_devices_manager.send(message).await.map_err(|e| {
+                StateManagerError::TX {
+                    reason: format!(
+                        "Failed to send request to devices manager"
+                    ),
+                    error: anyhow!("{}", e),
+                }
+            })?;
+        }
+
+        Ok(())
     }
 
     // Parse and log an error message
-    fn parse_error(&mut self, err_message: Option<Error>) {
+    fn parse_error(&mut self, err_message: Option<MossdError>) {
         // Log the full error chain for each error
-        if let Some(err_chain) = err_message {
-            for err in err_chain.chain() {
-                error!("{}", err);
-            }
+        if let Some(err) = err_message {
+            error!("{}", err);
+        } else {
+            warn!("Parsing empty error message");
         }
     }
 }

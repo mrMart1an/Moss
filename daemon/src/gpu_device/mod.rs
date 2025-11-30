@@ -36,8 +36,8 @@ pub enum DeviceError {
         reason: String,
         error: anyhow::Error,
     },
-    #[error("Device query error: {reason} - {error}")]
-    DeviceQuery {
+    #[error("Device internal error: {reason} - {error}")]
+    DeviceInternal {
         reason: String,
         error: anyhow::Error,
     },

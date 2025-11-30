@@ -14,21 +14,27 @@ use tokio::{
     },
 };
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info, trace, warn};
 
 use crate::{
-    errors::MossdError, fan_curve::{fan_mode::FanMode, FanCurve}, gpu_device::{
-        gpu_config::GpuConfig, gpu_data::{GpuData, GpuVendorData}, gpu_info::{GpuInfo, GpuVendorInfo}, nvidia_device::NvidiaDevice, DeviceError, GpuDevice, DEFAULT_FAN_UPDATE_INTERVAL
-    }
+    errors::MossdError,
+    fan_curve::{FanCurve, fan_mode::FanMode},
+    gpu_device::{
+        DEFAULT_FAN_UPDATE_INTERVAL, DeviceError, GpuDevice,
+        gpu_config::GpuConfig,
+        gpu_data::{GpuData, GpuVendorData},
+        gpu_info::{GpuInfo, GpuVendorInfo},
+        nvidia_device::NvidiaDevice,
+    },
 };
 
 type Responder = oneshot::Sender<DevicesManagerAnswer>;
 
 // Alias the result type for this module
-type Result<T> = std::result::Result<T, DeviceManagerError>;
+type Result<T> = std::result::Result<T, DevicesManagerError>;
 
 #[derive(Debug, Error)]
-pub enum DeviceManagerError {
+pub enum DevicesManagerError {
     #[error(transparent)]
     Device(#[from] DeviceError),
     #[error("Device manager discovery error: {reason}")]
@@ -42,6 +48,7 @@ pub enum DeviceManagerError {
     InvalidDevice { reason: String },
 }
 
+#[derive(Debug)]
 pub enum DevicesManagerMessage {
     // List all the devices managed by the devices manager
     ListDevices {
@@ -182,10 +189,18 @@ impl DevicesManager {
                 _ = run_token.cancelled() => {
                     info!("devices manager: Quiting");
 
+                    if let Err(err) = self.quit_manager() {
+                        error!("Error while quitting devices manager: {}", err);
+                    }
+
                     break;
                 },
                 message = rx_message.recv() => {
+                    trace!("Handling message: {:?}", message);
+
                     if let Err(err) = self.parse_message(message) {
+                        error!("Error during message handling: {}", err);
+
                         tx_err.send(err.into()).await.unwrap_or_else(|err| {
                             error!("Failed to send error over channel: {err}");
                         });
@@ -193,7 +208,10 @@ impl DevicesManager {
                 },
                 // Update the fan and schedule the next update
                 _ = tokio::time::sleep(next_fan_update_time) => {
-                    if let Err(err) = self.update_fans(&next_fan_update_device) {
+                    if let Err(err) = self.update_fans(&next_fan_update_device)
+                    {
+                        error!("Error during fan update: {}", err);
+
                         tx_err.send(err.into()).await.unwrap_or_else(|err| {
                             error!("Failed to send error over channel: {err}");
                         });
@@ -213,7 +231,7 @@ impl DevicesManager {
         devices_map: &mut HashMap<String, Box<dyn GpuDevice + Send>>,
     ) -> Result<()> {
         let device_count = nvml.device_count().map_err(|e| {
-            DeviceManagerError::Discovery {
+            DevicesManagerError::Discovery {
                 reason: format!("Failed to enumerate Nvidia devices"),
                 error: e.into(),
             }
@@ -222,20 +240,19 @@ impl DevicesManager {
         for i in 0..device_count {
             // Get the UUID of each device
             let device = nvml.device_by_index(i).map_err(|e| {
-                DeviceManagerError::Discovery {
+                DevicesManagerError::Discovery {
                     reason: format!("Failed to get Nvidia device"),
                     error: e.into(),
                 }
             })?;
-            let uuid = device.uuid().map_err(|e| {
-                DeviceManagerError::Discovery {
+            let uuid =
+                device.uuid().map_err(|e| DevicesManagerError::Discovery {
                     reason: format!(
                         "Failed to get Nvidia device uuid (index: {})",
                         i
                     ),
                     error: e.into(),
-                }
-            })?;
+                })?;
 
             debug!("Found Nvidia device: \"{}\"", uuid);
 
@@ -255,7 +272,6 @@ impl DevicesManager {
         message: Option<DevicesManagerMessage>,
     ) -> Result<()> {
         if message.is_none() {
-            warn!("GPUs manager: parsing empty message");
             return Ok(());
         }
 
@@ -268,7 +284,7 @@ impl DevicesManager {
                 }
 
                 let answer = DevicesManagerAnswer::DeviceList(devices_list);
-                tx.send(answer).map_err(|v| DeviceManagerError::TX {
+                tx.send(answer).map_err(|v| DevicesManagerError::TX {
                     reason: format!(
                         "Failed to send answer over channel: ({:?})",
                         v
@@ -278,14 +294,14 @@ impl DevicesManager {
 
             DevicesManagerMessage::GetDeviceInfo { uuid, tx } => {
                 let device = self.devices.get(&uuid).ok_or_else(|| {
-                    DeviceManagerError::InvalidDevice {
+                    DevicesManagerError::InvalidDevice {
                         reason: format!("Trying to access non-existing device"),
                     }
                 })?;
 
                 let answer =
                     DevicesManagerAnswer::DeviceInfo(device.get_info());
-                tx.send(answer).map_err(|v| DeviceManagerError::TX {
+                tx.send(answer).map_err(|v| DevicesManagerError::TX {
                     reason: format!(
                         "Failed to send answer over channel: ({:?})",
                         v
@@ -294,7 +310,7 @@ impl DevicesManager {
             }
             DevicesManagerMessage::GetDeviceVendorInfo { uuid, tx } => {
                 let device = self.devices.get(&uuid).ok_or_else(|| {
-                    DeviceManagerError::InvalidDevice {
+                    DevicesManagerError::InvalidDevice {
                         reason: format!("Trying to access non-existing device"),
                     }
                 })?;
@@ -302,7 +318,7 @@ impl DevicesManager {
                 let answer = DevicesManagerAnswer::DeviceVendorInfo(
                     device.get_vendor_info(),
                 );
-                tx.send(answer).map_err(|v| DeviceManagerError::TX {
+                tx.send(answer).map_err(|v| DevicesManagerError::TX {
                     reason: format!(
                         "Failed to send answer over channel: ({:?})",
                         v
@@ -312,7 +328,7 @@ impl DevicesManager {
 
             DevicesManagerMessage::GetDeviceData { uuid, tx } => {
                 let device = self.devices.get_mut(&uuid).ok_or_else(|| {
-                    DeviceManagerError::InvalidDevice {
+                    DevicesManagerError::InvalidDevice {
                         reason: format!("Trying to access non-existing device"),
                     }
                 })?;
@@ -320,7 +336,7 @@ impl DevicesManager {
                 // TODO: Report error on failure
                 let answer =
                     DevicesManagerAnswer::DeviceData(device.get_data().ok());
-                tx.send(answer).map_err(|v| DeviceManagerError::TX {
+                tx.send(answer).map_err(|v| DevicesManagerError::TX {
                     reason: format!(
                         "Failed to send answer over channel: ({:?})",
                         v
@@ -329,7 +345,7 @@ impl DevicesManager {
             }
             DevicesManagerMessage::GetDeviceVendorData { uuid, tx } => {
                 let device = self.devices.get_mut(&uuid).ok_or_else(|| {
-                    DeviceManagerError::InvalidDevice {
+                    DevicesManagerError::InvalidDevice {
                         reason: format!("Trying to access non-existing device"),
                     }
                 })?;
@@ -338,7 +354,7 @@ impl DevicesManager {
                 let answer = DevicesManagerAnswer::DeviceVendorData(
                     device.get_vendor_data().ok(),
                 );
-                tx.send(answer).map_err(|v| DeviceManagerError::TX {
+                tx.send(answer).map_err(|v| DevicesManagerError::TX {
                     reason: format!(
                         "Failed to send answer over channel: ({:?})",
                         v
@@ -350,7 +366,7 @@ impl DevicesManager {
                 interval,
             } => {
                 let device = self.devices.get_mut(&uuid).ok_or_else(|| {
-                    DeviceManagerError::InvalidDevice {
+                    DevicesManagerError::InvalidDevice {
                         reason: format!("Trying to access non-existing device"),
                     }
                 })?;
@@ -360,7 +376,7 @@ impl DevicesManager {
 
             DevicesManagerMessage::SetDeviceFanMode { uuid, fan_mode } => {
                 let device = self.devices.get_mut(&uuid).ok_or_else(|| {
-                    DeviceManagerError::InvalidDevice {
+                    DevicesManagerError::InvalidDevice {
                         reason: format!("Trying to access non-existing device"),
                     }
                 })?;
@@ -369,7 +385,7 @@ impl DevicesManager {
             }
             DevicesManagerMessage::SetDeviceFanCurve { uuid, fan_curve } => {
                 let device = self.devices.get_mut(&uuid).ok_or_else(|| {
-                    DeviceManagerError::InvalidDevice {
+                    DevicesManagerError::InvalidDevice {
                         reason: format!("Trying to access non-existing device"),
                     }
                 })?;
@@ -385,7 +401,7 @@ impl DevicesManager {
 
             DevicesManagerMessage::ApplyDeviceGpuConfig { uuid, config } => {
                 let device = self.devices.get_mut(&uuid).ok_or_else(|| {
-                    DeviceManagerError::InvalidDevice {
+                    DevicesManagerError::InvalidDevice {
                         reason: format!("Trying to access non-existing device"),
                     }
                 })?;
@@ -436,12 +452,22 @@ impl DevicesManager {
 
             Ok(())
         } else {
-            Err(DeviceManagerError::InvalidDevice {
+            Err(DevicesManagerError::InvalidDevice {
                 reason: format!(
                     "Trying to update fan on non-existing device: {}",
                     uuid
                 ),
             })
         }
+    }
+
+    // Restore the default setting for all device before quitting
+    fn quit_manager(&mut self) -> Result<()> {
+        for (_, device) in self.devices.iter_mut() {
+            device.set_fan_mode(FanMode::Auto)?;
+            device.apply_gpu_config(GpuConfig::default())?;
+        }
+
+        Ok(())
     }
 }

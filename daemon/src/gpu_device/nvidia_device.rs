@@ -343,16 +343,19 @@ impl GpuDevice for NvidiaDevice {
                     ),
                     error: e.into(),
                 })?,
-            _ => self
-                .get_device()?
-                .set_fan_control_policy(0, FanControlPolicy::Manual)
-                .map_err(|e| DeviceError::DeviceFanError {
-                    reason: format!(
-                        "Failed to set fan mode to manual for: \"{}\"",
-                        self.uuid
-                    ),
-                    error: e.into(),
-                })?,
+            _ => {
+                self.get_device()?
+                    .set_fan_control_policy(0, FanControlPolicy::Manual)
+                    .map_err(|e| DeviceError::DeviceFanError {
+                        reason: format!(
+                            "Failed to set fan mode to manual for: \"{}\"",
+                            self.uuid
+                        ),
+                        error: e.into(),
+                    })?;
+
+                self.update_fan()?;
+            }
         }
 
         self.fan_mode = fan_mode;
@@ -363,7 +366,7 @@ impl GpuDevice for NvidiaDevice {
     fn update_fan(&mut self) -> Result<()> {
         // Get the NVML device
         let mut device = self.get_device().map_err(|e| match e {
-            DeviceError::DeviceQuery { reason: _, error } => {
+            DeviceError::DeviceInternal { reason: _, error } => {
                 DeviceError::DeviceFanError {
                     reason: format!("Device query error during fan update"),
                     error,
@@ -450,7 +453,19 @@ impl GpuDevice for NvidiaDevice {
 
         // Set the power limit
         if let Some(power_limit) = gpu_config.power_limit {
-            device.set_power_management_limit(power_limit)?;
+            if power_limit > self.gpu_info.power_limit_max {
+                warn!(
+                    "requested power limit is beyond max ({}), ingoring it",
+                    self.gpu_info.power_limit_max
+                );
+            } else if power_limit < self.gpu_info.power_limit_min {
+                warn!(
+                    "requested power limit is bellow min ({}), ingoring it",
+                    self.gpu_info.power_limit_min
+                );
+            } else {
+                device.set_power_management_limit(power_limit)?;
+            }
         }
 
         // Set vendor specific config
@@ -467,7 +482,7 @@ impl GpuDevice for NvidiaDevice {
 
 impl From<NvmlError> for DeviceError {
     fn from(value: NvmlError) -> Self {
-        Self::DeviceQuery {
+        Self::DeviceInternal {
             reason: format!("Device query error"),
             error: value.into(),
         }

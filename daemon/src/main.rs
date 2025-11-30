@@ -1,9 +1,10 @@
 use anyhow::Result;
 use mossd::{
-    arg_parser::ArgsOptions, config_manager::ConfigManager, devices_manager::DevicesManager, logger};
+    arg_parser::ArgsOptions, config_manager::ConfigManager,
+    devices_manager::DevicesManager, logger, state_manager::StateManager,
+};
 use tokio::{select, signal::ctrl_c, sync::mpsc};
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
-use tracing::error;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -18,7 +19,7 @@ async fn main() -> Result<()> {
 
     // Use thin channel to move errors to the state task
     // to later transmit then to the D-Bus
-    let (tx_err, mut rx_err) = mpsc::channel(16);
+    let (tx_err, rx_err) = mpsc::channel(16);
 
     // Start the configuration manager
     let (tx_config_manager, rx_config_manager) = mpsc::channel(16);
@@ -39,7 +40,6 @@ async fn main() -> Result<()> {
     {
         let token = token.clone();
         let tx_err = tx_err.clone();
-
 
         tracker.spawn(async move {
             let mut devices_manager = DevicesManager::new();
@@ -72,34 +72,23 @@ async fn main() -> Result<()> {
     //    });
     //}
 
-    //// Start the state manager
-    //{
-    //    let nvml = nvml.clone();
-    //    let token = token.clone();
+    // Start the state manager
+    {
+        let token = token.clone();
 
-    //    tracker.spawn(async move {
-    //        let mut state_manager = StateManager::new(
-    //            nvml,
+        tracker.spawn(async move {
+            let mut state_manager =
+                StateManager::new(tx_config_manager, tx_gpus_manager);
 
-    //            rx_dbus_service,
-
-    //            tx_fan_manager, 
-    //            tx_config_manager,
-    //            tx_gpus_manager
-    //        );
-
-    //        state_manager.run(token, rx_err).await;
-    //    });
-    //}
+            state_manager.run(token, rx_err).await;
+        });
+    }
 
     // TODO: Handle different unix signal for graceful termination
     select! {
         _ = ctrl_c() => {
 
         },
-        err = rx_err.recv() => {
-            error!("{:?}", err);
-        }
     }
 
     // Cancel the token to communicate the program
