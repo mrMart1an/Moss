@@ -1,3 +1,3 @@
 # Moss
 
-A Nvidia graphics card configuration utility for Wayland and X11
+A Nvidia only (for now) graphics card configuration utility for Wayland and X11
