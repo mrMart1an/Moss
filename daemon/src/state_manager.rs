@@ -15,16 +15,29 @@ use tracing::{error, warn};
 
 use crate::{
     config_manager::{ConfigMessage, ConfigMessageAnswer},
+    dbus_service::{DBusServiceAnswer, DBusServiceMessage},
     devices_manager::{DevicesManagerAnswer, DevicesManagerMessage},
     errors::MossdError,
     fan_curve::{
-        fan_curve_info::FanCurveInfo,
-        fan_mode::FanMode,
-        hysteresis_curve::HysteresisCurve,
-        linear_curve::LinearCurve,
+        fan_curve_info::FanCurveInfo, fan_mode::FanMode,
+        hysteresis_curve::HysteresisCurve, linear_curve::LinearCurve,
     },
     gpu_device::gpu_config::GpuConfig,
 };
+
+macro_rules! extract_answer {
+    ( $expected:path, $answer:expr ) => {{
+        let result = if let $expected(data) = $answer {
+            Ok(data)
+        } else {
+            Err(StateManagerError::InvalidResponse {
+                reason: format!("Invalid responce {:?}", $answer),
+            })
+        };
+
+        result
+    }};
+}
 
 type Result<T> = std::result::Result<T, StateManagerError>;
 
@@ -47,16 +60,19 @@ pub enum StateManagerError {
 pub struct StateManager {
     tx_config_manager: Sender<ConfigMessage>,
     tx_devices_manager: Sender<DevicesManagerMessage>,
+    rx_dbus_service: Receiver<DBusServiceMessage>,
 }
 
 impl StateManager {
     pub fn new(
         tx_config_manager: Sender<ConfigMessage>,
         tx_devices_manager: Sender<DevicesManagerMessage>,
+        rx_dbus_service: Receiver<DBusServiceMessage>,
     ) -> Self {
         Self {
             tx_config_manager,
             tx_devices_manager,
+            rx_dbus_service,
         }
     }
 
@@ -79,34 +95,89 @@ impl StateManager {
                 err_message = rx_err.recv() => {
                     self.parse_error(err_message);
                 }
-                //message = self.rx_dbus_service.recv() => {
-                //    self.parse_dbus_message(message).await;
-                //}
+                message = self.rx_dbus_service.recv() => {
+                    self.parse_dbus_message(message).await;
+                }
             }
         }
     }
 
-    //async fn parse_dbus_message(
-    //    &mut self,
-    //    message: Option<DBusServiceMessage>,
-    //) {
-    //    if let Some(message) = message {
-    //        let (tx, answer) = match message {
-    //            DBusServiceMessage::GetGpusUuid(tx) => {
-    //                let uuids = self.gpu_uuids.clone();
-    //                (Some(tx), Some(DBusServiceAnswer::GpusUuid(uuids)))
-    //            }
-    //            _ => { (None, None) }
-    //        };
+    // Send a query to the device manager
+    async fn query_device_manager(
+        &mut self,
+        message: DevicesManagerMessage,
+        rx: oneshot::Receiver<DevicesManagerAnswer>,
+    ) -> Result<DevicesManagerAnswer> {
+        self.tx_devices_manager.send(message).await.map_err(|e| {
+            StateManagerError::TX {
+                reason: format!("Failed to send request to devices manager"),
+                error: anyhow!("{}", e),
+            }
+        })?;
 
-    //        // Send the message to channel if needed
-    //        if let (Some(tx), Some(answer)) = (tx, answer) {
-    //            if let Err(err) = tx.send(answer) {
-    //                error!("{:?}", err);
-    //            }
-    //        }
-    //    }
-    //}
+        let answer = rx.await.map_err(|e| StateManagerError::RX {
+            reason: format!("Failed to receive answer form devices manager"),
+            error: e.into(),
+        })?;
+
+        Ok(answer)
+    }
+
+    // Send a query to the config manager
+    async fn query_config_manager(
+        &mut self,
+        message: ConfigMessage,
+        rx: oneshot::Receiver<ConfigMessageAnswer>,
+    ) -> Result<ConfigMessageAnswer> {
+        self.tx_config_manager.send(message).await.map_err(|e| {
+            StateManagerError::TX {
+                reason: format!("Failed to send request to config manager"),
+                error: anyhow!("{}", e),
+            }
+        })?;
+
+        let answer = rx.await.map_err(|e| StateManagerError::RX {
+            reason: format!("Failed to receive answer form config manager"),
+            error: e.into(),
+        })?;
+
+        Ok(answer)
+    }
+
+    async fn parse_dbus_message(
+        &mut self,
+        message: Option<DBusServiceMessage>,
+    ) -> Result<()> {
+        if let Some(message) = message {
+            let (tx, answer) = match message {
+                DBusServiceMessage::GetGpus { tx } => {
+                    // Request the device list to the device manager
+                    let (tx_uuids, rx_uuids) = oneshot::channel();
+                    let message =
+                        DevicesManagerMessage::ListDevices { tx: tx_uuids };
+                    let answer =
+                        self.query_device_manager(message, rx_uuids).await?;
+
+                    let uuids = extract_answer!(
+                        DevicesManagerAnswer::DeviceList,
+                        answer
+                    )?;
+
+                    (Some(tx), Some(DBusServiceAnswer::Gpus { uuids }))
+                }
+                _ => (None, None),
+            };
+
+            // Send the message to channel if needed
+            if let (Some(tx), Some(answer)) = (tx, answer) {
+                if let Err(err) = tx.send(answer) {
+                    error!("{:?}", err);
+                }
+            }
+        }
+
+        Ok(())
+    }
 
     // Query the configuration manager about the current settings
     // and applies them to the various devices at start-up
@@ -114,27 +185,14 @@ impl StateManager {
         // Get the UUIDs of the devices on the system
         let (answer_tx, answer_rx) = oneshot::channel();
 
-        self.tx_devices_manager
-            .send(DevicesManagerMessage::ListDevices { tx: answer_tx })
-            .await
-            .map_err(|e| StateManagerError::TX {
-                reason: format!("Failed to send request to devices manager"),
-                error: anyhow!("{}", e),
-            })?;
+        let answer = self
+            .query_device_manager(
+                DevicesManagerMessage::ListDevices { tx: answer_tx },
+                answer_rx,
+            )
+            .await?;
 
-        let answer = answer_rx.await.map_err(|e| StateManagerError::RX {
-            reason: format!("Failed to receive answer form devices manager"),
-            error: e.into(),
-        })?;
-
-        let uuids = if let DevicesManagerAnswer::DeviceList(uuids_list) = answer
-        {
-            uuids_list
-        } else {
-            return Err(StateManagerError::InvalidResponse {
-                reason: format!("Invalid responce from devices manager"),
-            });
-        };
+        let uuids = extract_answer!(DevicesManagerAnswer::DeviceList, answer)?;
 
         // Request and apply the configuration information for every GPUs
         for uuid in uuids {
@@ -145,26 +203,9 @@ impl StateManager {
                 tx,
             };
 
-            self.tx_config_manager.send(message).await.map_err(|e| {
-                StateManagerError::TX {
-                    reason: format!("Failed to send query to config manager"),
-                    error: anyhow!("{}", e),
-                }
-            })?;
-
-            let answer = rx.await.map_err(|e| StateManagerError::RX {
-                reason: format!("Failed to receive answer form config manager"),
-                error: e.into(),
-            })?;
-
+            let answer = self.query_config_manager(message, rx).await?;
             let fan_curve_info =
-                if let ConfigMessageAnswer::FanCurve(data) = answer {
-                    data
-                } else {
-                    return Err(StateManagerError::InvalidResponse {
-                        reason: format!("Invalid responce from config manager"),
-                    });
-                };
+                extract_answer!(ConfigMessageAnswer::FanCurve, answer)?;
 
             // Apply the fan curve settings
             self.apply_fan_curve(&uuid, fan_curve_info).await?;
@@ -176,26 +217,11 @@ impl StateManager {
                 tx,
             };
 
-            self.tx_config_manager.send(message).await.map_err(|e| {
-                StateManagerError::TX {
-                    reason: format!("Failed to send query to config manager"),
-                    error: anyhow!("{}", e),
-                }
-            })?;
-
-            let answer = rx.await.map_err(|e| StateManagerError::RX {
-                reason: format!("Failed to receive answer form config manager"),
-                error: e.into(),
-            })?;
-
-            let update_interval =
-                if let ConfigMessageAnswer::FanUpdateInterval(data) = answer {
-                    data
-                } else {
-                    return Err(StateManagerError::InvalidResponse {
-                        reason: format!("Invalid responce from config manager"),
-                    });
-                };
+            let answer = self.query_config_manager(message, rx).await?;
+            let update_interval = extract_answer!(
+                ConfigMessageAnswer::FanUpdateInterval,
+                answer
+            )?;
 
             // Apply the fan curve settings
             self.apply_fan_update_interval(&uuid, update_interval)
@@ -208,25 +234,9 @@ impl StateManager {
                 tx,
             };
 
-            self.tx_config_manager.send(message).await.map_err(|e| {
-                StateManagerError::TX {
-                    reason: format!("Failed to send query to config manager"),
-                    error: anyhow!("{}", e),
-                }
-            })?;
-
-            let answer = rx.await.map_err(|e| StateManagerError::RX {
-                reason: format!("Failed to receive answer form config manager"),
-                error: e.into(),
-            })?;
-
-            let fan_mode = if let ConfigMessageAnswer::FanMode(data) = answer {
-                data
-            } else {
-                return Err(StateManagerError::InvalidResponse {
-                    reason: format!("Invalid responce from config manager"),
-                });
-            };
+            let answer = self.query_config_manager(message, rx).await?;
+            let fan_mode =
+                extract_answer!(ConfigMessageAnswer::FanMode, answer)?;
 
             // Apply the fan mode
             self.apply_fan_mode(&uuid, fan_mode).await?;
@@ -238,25 +248,8 @@ impl StateManager {
                 tx,
             };
 
-            self.tx_config_manager.send(message).await.map_err(|e| {
-                StateManagerError::TX {
-                    reason: format!("Failed to send query to config manager"),
-                    error: anyhow!("{}", e),
-                }
-            })?;
-
-            let answer = rx.await.map_err(|e| StateManagerError::RX {
-                reason: format!("Failed to receive answer form config manager"),
-                error: e.into(),
-            })?;
-
-            let config = if let ConfigMessageAnswer::Config(data) = answer {
-                data
-            } else {
-                return Err(StateManagerError::InvalidResponse {
-                    reason: format!("Invalid responce from config manager"),
-                });
-            };
+            let answer = self.query_config_manager(message, rx).await?;
+            let config = extract_answer!(ConfigMessageAnswer::Config, answer)?;
 
             // Apply the fan curve settings
             self.apply_config(&uuid, config).await?;

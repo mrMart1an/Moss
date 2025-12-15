@@ -1,8 +1,8 @@
 use thiserror::Error;
 
 use crate::{
-    config_manager::ConfigError, devices_manager::DevicesManagerError,
-    state_manager::StateManagerError,
+    config_manager::ConfigError, dbus_service::DbusServiceError,
+    devices_manager::DevicesManagerError, state_manager::StateManagerError,
 };
 
 // The main daemon error type
@@ -14,4 +14,6 @@ pub enum MossdError {
     DevicesManager(#[from] DevicesManagerError),
     #[error(transparent)]
     StateManager(#[from] StateManagerError),
+    #[error(transparent)]
+    DBusService(#[from] DbusServiceError),
 }

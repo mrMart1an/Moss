@@ -1,7 +1,14 @@
+// GLOBAL TODO
+// TODO: Add second channel to devices manager to
+// communicate data updates to the state manager
+// TODO: Add second channel to DBus service to be 
+// receive notification about data updates
+
 use anyhow::Result;
 use mossd::{
     arg_parser::ArgsOptions, config_manager::ConfigManager,
-    devices_manager::DevicesManager, logger, state_manager::StateManager,
+    dbus_service::DBusService, devices_manager::DevicesManager, logger,
+    state_manager::StateManager,
 };
 use tokio::{select, signal::ctrl_c, sync::mpsc};
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
@@ -47,38 +54,28 @@ async fn main() -> Result<()> {
         });
     }
 
-    //// Start the fan speed manager
-    //let (tx_fan_manager, rx_fan_manager) = mpsc::channel(16);
-    //{
-    //    let nvml = nvml.clone();
-    //    let token = token.clone();
-    //    let tx_err = tx_err.clone();
+    // Start the D-Bus service
+    let (tx_dbus_service, rx_dbus_service) = mpsc::channel(16);
+    {
+        let token = token.clone();
+        let tx_err = tx_err.clone();
 
-    //    tracker.spawn(async move {
-    //        let mut fan_manager = FanManager::new(nvml);
-    //        fan_manager.run(token, rx_fan_manager, tx_err).await;
-    //    });
-    //}
-
-    //// Start the D-Bus service
-    //let (tx_dbus_service, rx_dbus_service) = mpsc::channel(16);
-    //{
-    //    let token = token.clone();
-    //    let tx_err = tx_err.clone();
-
-    //    tracker.spawn(async move {
-    //        let mut dbus_service = DBusService::new();
-    //        dbus_service.run(token, tx_dbus_service, tx_err).await;
-    //    });
-    //}
+        tracker.spawn(async move {
+            let mut dbus_service = DBusService::new();
+            dbus_service.run(token, tx_dbus_service, tx_err).await;
+        });
+    }
 
     // Start the state manager
     {
         let token = token.clone();
 
         tracker.spawn(async move {
-            let mut state_manager =
-                StateManager::new(tx_config_manager, tx_gpus_manager);
+            let mut state_manager = StateManager::new(
+                tx_config_manager,
+                tx_gpus_manager,
+                rx_dbus_service,
+            );
 
             state_manager.run(token, rx_err).await;
         });
