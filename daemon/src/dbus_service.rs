@@ -10,7 +10,24 @@ use tokio_util::sync::CancellationToken;
 use tracing::{error, info, trace};
 use zbus::{Connection, interface};
 
-use crate::errors::MossdError;
+use crate::{
+    errors::MossdError,
+    gpu_device::gpu_info::{GpuInfo, GpuVendorInfo},
+};
+
+macro_rules! extract_answer {
+    ( $expected:path, $answer:expr ) => {{
+        let result = if let $expected(data) = $answer {
+            Ok(data)
+        } else {
+            Err(DbusServiceError::InvalidResponse {
+                reason: format!("Invalid responce {:?}", $answer),
+            })
+        };
+
+        result
+    }};
+}
 
 const SERVICE_NAME: &str = "com.github.Mossd1";
 
@@ -21,10 +38,7 @@ type Result<T> = std::result::Result<T, DbusServiceError>;
 #[derive(Debug, Error)]
 pub enum DbusServiceError {
     #[error("DBus service manager TX error: {reason}")]
-    TX {
-        reason: String,
-        error: anyhow::Error,
-    },
+    TX { reason: String },
     #[error("DBus service manager RX error: {reason}")]
     RX {
         reason: String,
@@ -49,13 +63,20 @@ pub enum DbusServiceError {
 pub enum DBusServiceMessage {
     // Get the UUIDs of all the GPUs on the system
     GetGpus { tx: Responder },
+
+    // Get the GPU infos
+    GetGpuInfo { uuid: String, tx: Responder },
+    GetGpuVendorInfo { uuid: String, tx: Responder },
 }
 
 // This is the answer enum that the state manager will use to
 // communicate with the D-Bus service
 #[derive(Debug)]
 pub enum DBusServiceAnswer {
-    Gpus { uuids: Vec<String> },
+    Gpus(Vec<String>),
+
+    GpuInfo(GpuInfo),
+    GpuVendorInfo(GpuVendorInfo),
 }
 
 pub struct DBusService;
@@ -63,23 +84,186 @@ pub struct DBusService;
 // GPU D-Bus interface
 struct GpuInterface {
     uuid: String,
+
     tx_dbus_service: Sender<DBusServiceMessage>,
+    tx_err: Sender<MossdError>,
+
+    gpu_info: GpuInfo,
 }
 
 impl GpuInterface {
-    fn new(uuid: String, tx_dbus_service: Sender<DBusServiceMessage>) -> Self {
-        Self {
+    async fn new(
+        uuid: String,
+        tx_dbus_service: Sender<DBusServiceMessage>,
+        tx_err: Sender<MossdError>,
+    ) -> Result<Self> {
+        // Get the GPU infos
+        let (tx, rx) = oneshot::channel();
+        let message = DBusServiceMessage::GetGpuInfo {
+            uuid: uuid.clone(),
+            tx,
+        };
+
+        tx_dbus_service.send(message).await.map_err(|_| {
+            DbusServiceError::TX {
+                reason: format!("Failed to send message to state manager"),
+            }
+        })?;
+
+        let answer = rx.await.map_err(|e| DbusServiceError::RX {
+            reason: format!("Failed to receive answer from state manager"),
+            error: e.into(),
+        })?;
+
+        let gpu_info = extract_answer!(DBusServiceAnswer::GpuInfo, answer)?;
+
+        Ok(Self {
             uuid,
+
             tx_dbus_service,
-        }
+            tx_err,
+
+            gpu_info,
+        })
     }
 }
 
 #[interface(name = "com.github.Mossd1.Gpu")]
 impl GpuInterface {
+    // GPU info properties
     #[zbus(property)]
-    async fn temp(&self) -> u32 {
-        32
+    async fn uuid(&self) -> &str {
+        &self.uuid
+    }
+    #[zbus(property)]
+    async fn name(&self) -> &str {
+        &self.gpu_info.name
+    }
+
+    #[zbus(property)]
+    async fn pcie_width(&self) -> u32 {
+        self.gpu_info.pcie_width
+    }
+    #[zbus(property)]
+    async fn pcie_gen(&self) -> u32 {
+        self.gpu_info.pcie_gen
+    }
+
+    #[zbus(property)]
+    async fn power_limit_max(&self) -> u32 {
+        self.gpu_info.power_limit_max
+    }
+    #[zbus(property)]
+    async fn power_limit_min(&self) -> u32 {
+        self.gpu_info.power_limit_min
+    }
+    #[zbus(property)]
+    async fn power_limit_default(&self) -> u32 {
+        self.gpu_info.power_limit_default
+    }
+}
+
+struct NvidiaInterface {
+    uuid: String,
+
+    tx_dbus_service: Sender<DBusServiceMessage>,
+    tx_err: Sender<MossdError>,
+
+    gpu_vendor_info: GpuVendorInfo,
+}
+
+impl NvidiaInterface {
+    async fn new(
+        uuid: String,
+        gpu_vendor_info: GpuVendorInfo,
+        tx_dbus_service: Sender<DBusServiceMessage>,
+        tx_err: Sender<MossdError>,
+    ) -> Result<Self> {
+        Ok(Self {
+            uuid,
+
+            tx_dbus_service,
+            tx_err,
+
+            gpu_vendor_info,
+        })
+    }
+}
+
+#[interface(name = "com.github.Mossd1.Nvidia")]
+impl NvidiaInterface {
+    // GPU vendor info properties
+    #[zbus(property)]
+    async fn driver_version(&self) -> &str {
+        if let GpuVendorInfo::Nvidia { driver_version, .. } =
+            &self.gpu_vendor_info
+        {
+            driver_version
+        } else {
+            &"VENDOR INFO NOT NVIDIA!"
+        }
+    }
+    #[zbus(property)]
+    async fn vbios(&self) -> &str {
+        if let GpuVendorInfo::Nvidia { vbios, .. } =
+            &self.gpu_vendor_info
+        {
+            vbios
+        } else {
+            &"VENDOR INFO NOT NVIDIA!"
+        }
+    }
+
+    #[zbus(property)]
+    async fn cuda_core_count(&self) -> u32 {
+        if let GpuVendorInfo::Nvidia { cuda_core_count, .. } =
+            self.gpu_vendor_info
+        {
+            cuda_core_count
+        } else {
+            0
+        }
+    }
+
+    #[zbus(property)]
+    async fn max_temp(&self) -> u32 {
+        if let GpuVendorInfo::Nvidia { max_temp, .. } =
+            self.gpu_vendor_info
+        {
+            max_temp.unwrap_or(0)
+        } else {
+            0
+        }
+    }
+    #[zbus(property)]
+    async fn mem_max_temp(&self) -> u32 {
+        if let GpuVendorInfo::Nvidia { mem_max_temp, .. } =
+            self.gpu_vendor_info
+        {
+            mem_max_temp.unwrap_or(0)
+        } else {
+            0
+        }
+    }
+    #[zbus(property)]
+    async fn slowdown_temp(&self) -> u32 {
+        if let GpuVendorInfo::Nvidia { slowdown_temp, .. } =
+            self.gpu_vendor_info
+        {
+            slowdown_temp.unwrap_or(0)
+        } else {
+            0
+        }
+    }
+    #[zbus(property)]
+    async fn shutdown_temp(&self) -> u32 {
+        if let GpuVendorInfo::Nvidia { shutdown_temp, .. } =
+            self.gpu_vendor_info
+        {
+            shutdown_temp.unwrap_or(0)
+        } else {
+            0
+        }
     }
 }
 
@@ -119,8 +303,12 @@ impl DBusService {
 
         trace!("DBus connection enstablished");
 
-        if let Err(err) =
-            self.initialize_service(&connection, tx_dbus_service).await
+        if let Err(err) = Self::initialize_service(
+            &connection,
+            tx_dbus_service,
+            tx_err.clone(),
+        )
+        .await
         {
             if let Err(cerr) = tx_err.send(err.into()).await {
                 error!("Failed to send error over channel: {}", cerr);
@@ -138,18 +326,17 @@ impl DBusService {
     }
 
     async fn initialize_service(
-        &mut self,
         connection: &Connection,
         tx_dbus_service: Sender<DBusServiceMessage>,
+        tx_err: Sender<MossdError>,
     ) -> Result<()> {
         // Query the state manager to get a list of the available GPUs
         let (tx, rx) = oneshot::channel();
         let message = DBusServiceMessage::GetGpus { tx };
 
-        tx_dbus_service.send(message).await.map_err(|e| {
+        tx_dbus_service.send(message).await.map_err(|_| {
             DbusServiceError::TX {
                 reason: format!("Failed to send message to state manager"),
-                error: anyhow!("{:?}", e),
             }
         })?;
 
@@ -159,7 +346,7 @@ impl DBusService {
             error: e.into(),
         })?;
 
-        let gpu_uuids = if let DBusServiceAnswer::Gpus { uuids } = answer {
+        let gpu_uuids = if let DBusServiceAnswer::Gpus(uuids) = answer {
             Ok(uuids)
         } else {
             Err(DbusServiceError::InvalidResponse {
@@ -174,16 +361,15 @@ impl DBusService {
             trace!("Creating D-Bus object for GPU: {}", uuid);
 
             let path = format!("/com/github/Mossd1/Gpu{}", gpu_count);
-            let tx = tx_dbus_service.clone();
 
-            connection
-                .object_server()
-                .at(path, GpuInterface::new(uuid.clone(), tx))
-                .await
-                .map_err(|e| DbusServiceError::DBusObject {
-                    reason: format!("Error while initializing GPU object"),
-                    error: e.into(),
-                })?;
+            Self::initialize_object(
+                path,
+                uuid,
+                connection,
+                tx_dbus_service.clone(),
+                tx_err.clone(),
+            )
+            .await?;
 
             gpu_count += 1;
         }
@@ -197,6 +383,78 @@ impl DBusService {
                 error: e.into(),
             }
         })?;
+
+        Ok(())
+    }
+
+    async fn initialize_object(
+        path: String,
+        uuid: String,
+
+        connection: &Connection,
+
+        tx_dbus: Sender<DBusServiceMessage>,
+        tx_err: Sender<MossdError>,
+    ) -> Result<()> {
+        // Get the GPU vendor infos
+        let (tx, rx) = oneshot::channel();
+        let message = DBusServiceMessage::GetGpuVendorInfo {
+            uuid: uuid.clone(),
+            tx,
+        };
+
+        tx_dbus
+            .send(message)
+            .await
+            .map_err(|_| DbusServiceError::TX {
+                reason: format!("Failed to send message to state manager"),
+            })?;
+
+        let answer = rx.await.map_err(|e| DbusServiceError::RX {
+            reason: format!("Failed to receive answer from state manager"),
+            error: e.into(),
+        })?;
+
+        let gpu_vendor_info =
+            extract_answer!(DBusServiceAnswer::GpuVendorInfo, answer)?;
+
+        connection
+            .object_server()
+            .at(
+                path.clone(),
+                GpuInterface::new(
+                    uuid.clone(),
+                    tx_dbus.clone(),
+                    tx_err.clone(),
+                )
+                .await?,
+            )
+            .await
+            .map_err(|e| DbusServiceError::DBusObject {
+                reason: format!("Error while initializing GPU object"),
+                error: e.into(),
+            })?;
+
+        // Create a Nvidia interface if the GPU is Nvidia
+        if matches!(gpu_vendor_info, GpuVendorInfo::Nvidia { .. }) {
+            connection
+                .object_server()
+                .at(
+                    path.clone(),
+                    NvidiaInterface::new(
+                        uuid.clone(),
+                        gpu_vendor_info,
+                        tx_dbus.clone(),
+                        tx_err.clone(),
+                    )
+                    .await?,
+                )
+                .await
+                .map_err(|e| DbusServiceError::DBusObject {
+                    reason: format!("Error while initializing GPU object"),
+                    error: e.into(),
+                })?;
+        }
 
         Ok(())
     }

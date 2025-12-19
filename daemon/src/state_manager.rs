@@ -44,10 +44,7 @@ type Result<T> = std::result::Result<T, StateManagerError>;
 #[derive(Debug, Error)]
 pub enum StateManagerError {
     #[error("State manager TX error: {reason}")]
-    TX {
-        reason: String,
-        error: anyhow::Error,
-    },
+    TX { reason: String },
     #[error("State manager RX error: {reason}")]
     RX {
         reason: String,
@@ -96,7 +93,9 @@ impl StateManager {
                     self.parse_error(err_message);
                 }
                 message = self.rx_dbus_service.recv() => {
-                    self.parse_dbus_message(message).await;
+                    if let Err(e) = self.parse_dbus_message(message).await {
+                        // TODO: Handle parse errors
+                    }
                 }
             }
         }
@@ -108,10 +107,9 @@ impl StateManager {
         message: DevicesManagerMessage,
         rx: oneshot::Receiver<DevicesManagerAnswer>,
     ) -> Result<DevicesManagerAnswer> {
-        self.tx_devices_manager.send(message).await.map_err(|e| {
+        self.tx_devices_manager.send(message).await.map_err(|_| {
             StateManagerError::TX {
                 reason: format!("Failed to send request to devices manager"),
-                error: anyhow!("{}", e),
             }
         })?;
 
@@ -129,10 +127,9 @@ impl StateManager {
         message: ConfigMessage,
         rx: oneshot::Receiver<ConfigMessageAnswer>,
     ) -> Result<ConfigMessageAnswer> {
-        self.tx_config_manager.send(message).await.map_err(|e| {
+        self.tx_config_manager.send(message).await.map_err(|_| {
             StateManagerError::TX {
                 reason: format!("Failed to send request to config manager"),
-                error: anyhow!("{}", e),
             }
         })?;
 
@@ -149,27 +146,59 @@ impl StateManager {
         message: Option<DBusServiceMessage>,
     ) -> Result<()> {
         if let Some(message) = message {
-            let (tx, answer) = match message {
-                DBusServiceMessage::GetGpus { tx } => {
+            let answer = match message {
+                DBusServiceMessage::GetGpus { tx: tx_answer } => {
                     // Request the device list to the device manager
-                    let (tx_uuids, rx_uuids) = oneshot::channel();
-                    let message =
-                        DevicesManagerMessage::ListDevices { tx: tx_uuids };
-                    let answer =
-                        self.query_device_manager(message, rx_uuids).await?;
+                    let (tx, rx) = oneshot::channel();
+                    let message = DevicesManagerMessage::ListDevices { tx };
+                    let answer = self.query_device_manager(message, rx).await?;
 
                     let uuids = extract_answer!(
                         DevicesManagerAnswer::DeviceList,
                         answer
                     )?;
 
-                    (Some(tx), Some(DBusServiceAnswer::Gpus { uuids }))
+                    Some((tx_answer, DBusServiceAnswer::Gpus(uuids)))
                 }
-                _ => (None, None),
+                DBusServiceMessage::GetGpuInfo {
+                    uuid,
+                    tx: tx_answer,
+                } => {
+                    let (tx, rx) = oneshot::channel();
+                    let message =
+                        DevicesManagerMessage::GetDeviceInfo { uuid, tx };
+                    let answer = self.query_device_manager(message, rx).await?;
+
+                    let device_info = extract_answer!(
+                        DevicesManagerAnswer::DeviceInfo,
+                        answer
+                    )?;
+
+                    Some((tx_answer, DBusServiceAnswer::GpuInfo(device_info)))
+                }
+                DBusServiceMessage::GetGpuVendorInfo {
+                    uuid,
+                    tx: tx_answer,
+                } => {
+                    let (tx, rx) = oneshot::channel();
+                    let message =
+                        DevicesManagerMessage::GetDeviceVendorInfo { uuid, tx };
+                    let answer = self.query_device_manager(message, rx).await?;
+
+                    let device_vendor_info = extract_answer!(
+                        DevicesManagerAnswer::DeviceVendorInfo,
+                        answer
+                    )?;
+
+                    Some((
+                        tx_answer,
+                        DBusServiceAnswer::GpuVendorInfo(device_vendor_info),
+                    ))
+                }
             };
 
             // Send the message to channel if needed
-            if let (Some(tx), Some(answer)) = (tx, answer) {
+            if let Some((tx, answer)) = answer {
                 if let Err(err) = tx.send(answer) {
                     error!("{:?}", err);
                 }
@@ -268,10 +297,9 @@ impl StateManager {
             fan_mode,
         };
 
-        self.tx_devices_manager.send(message).await.map_err(|e| {
+        self.tx_devices_manager.send(message).await.map_err(|_| {
             StateManagerError::TX {
                 reason: format!("Failed to send request to devices manager"),
-                error: anyhow!("{}", e),
             }
         })?;
 
@@ -298,12 +326,11 @@ impl StateManager {
                 fan_curve,
             };
 
-            self.tx_devices_manager.send(message).await.map_err(|e| {
+            self.tx_devices_manager.send(message).await.map_err(|_| {
                 StateManagerError::TX {
                     reason: format!(
                         "Failed to send request to devices manager"
                     ),
-                    error: anyhow!("{}", e),
                 }
             })?;
         }
@@ -324,12 +351,11 @@ impl StateManager {
                 interval,
             };
 
-            self.tx_devices_manager.send(message).await.map_err(|e| {
+            self.tx_devices_manager.send(message).await.map_err(|_| {
                 StateManagerError::TX {
                     reason: format!(
                         "Failed to send request to devices manager"
                     ),
-                    error: anyhow!("{}", e),
                 }
             })?;
         }
@@ -350,12 +376,11 @@ impl StateManager {
                 config,
             };
 
-            self.tx_devices_manager.send(message).await.map_err(|e| {
+            self.tx_devices_manager.send(message).await.map_err(|_| {
                 StateManagerError::TX {
                     reason: format!(
                         "Failed to send request to devices manager"
                     ),
-                    error: anyhow!("{}", e),
                 }
             })?;
         }
