@@ -55,14 +55,15 @@ async fn main() -> Result<()> {
     }
 
     // Start the D-Bus service
-    let (tx_dbus_service, rx_dbus_service) = mpsc::channel(16);
+    let (tx_dbus_to_manager, rx_dbus_to_manager) = mpsc::channel(16);
+    let (tx_manager_to_dbus, rx_manager_to_dbus) = mpsc::channel(16);
     {
         let token = token.clone();
         let tx_err = tx_err.clone();
 
         tracker.spawn(async move {
             let mut dbus_service = DBusService::new();
-            dbus_service.run(token, tx_dbus_service, tx_err).await;
+            dbus_service.run(token, tx_dbus_to_manager, rx_manager_to_dbus, tx_err).await;
         });
     }
 
@@ -74,7 +75,9 @@ async fn main() -> Result<()> {
             let mut state_manager = StateManager::new(
                 tx_config_manager,
                 tx_gpus_manager,
-                rx_dbus_service,
+
+                rx_dbus_to_manager,
+                tx_manager_to_dbus
             );
 
             state_manager.run(token, rx_err).await;

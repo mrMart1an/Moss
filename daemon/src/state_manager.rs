@@ -15,14 +15,13 @@ use tracing::{error, warn};
 
 use crate::{
     config_manager::{ConfigMessage, ConfigMessageAnswer},
-    dbus_service::{DBusServiceAnswer, DBusServiceMessage},
     devices_manager::{DevicesManagerAnswer, DevicesManagerMessage},
     errors::MossdError,
     fan_curve::{
         fan_curve_info::FanCurveInfo, fan_mode::FanMode,
         hysteresis_curve::HysteresisCurve, linear_curve::LinearCurve,
     },
-    gpu_device::gpu_config::GpuConfig,
+    gpu_device::{gpu_config::GpuConfig, gpu_info::{GpuInfo, GpuVendorInfo}},
 };
 
 macro_rules! extract_answer {
@@ -41,6 +40,8 @@ macro_rules! extract_answer {
 
 type Result<T> = std::result::Result<T, StateManagerError>;
 
+type Responder = oneshot::Sender<StateManagerAnswer>;
+
 #[derive(Debug, Error)]
 pub enum StateManagerError {
     #[error("State manager TX error: {reason}")]
@@ -54,22 +55,49 @@ pub enum StateManagerError {
     InvalidResponse { reason: String },
 }
 
+// This is the message enum that the D-Bus service process will
+// send to the state manger to request data or set properties
+pub enum StateManagerMessage {
+    // Get the UUIDs of all the GPUs on the system
+    GetGpus { tx: Responder },
+
+    // Get the GPU infos
+    GetGpuInfo { uuid: String, tx: Responder },
+    GetGpuVendorInfo { uuid: String, tx: Responder },
+}
+
+// This is the answer enum that the state manager will use to
+// communicate with the D-Bus service
+#[derive(Debug)]
+pub enum StateManagerAnswer {
+    Gpus(Vec<String>),
+
+    GpuInfo(GpuInfo),
+    GpuVendorInfo(GpuVendorInfo),
+}
+
 pub struct StateManager {
     tx_config_manager: Sender<ConfigMessage>,
     tx_devices_manager: Sender<DevicesManagerMessage>,
-    rx_dbus_service: Receiver<DBusServiceMessage>,
+
+    // D-Bus service channels
+    rx_dbus_to_manager: Receiver<StateManagerMessage>,
+    tx_manager_to_dbus: Sender<StateManagerMessage>,
 }
 
 impl StateManager {
     pub fn new(
         tx_config_manager: Sender<ConfigMessage>,
         tx_devices_manager: Sender<DevicesManagerMessage>,
-        rx_dbus_service: Receiver<DBusServiceMessage>,
+
+        rx_dbus_to_manager: Receiver<StateManagerMessage>,
+        tx_manager_to_dbus: Sender<StateManagerMessage>,
     ) -> Self {
         Self {
             tx_config_manager,
             tx_devices_manager,
-            rx_dbus_service,
+            rx_dbus_to_manager,
+            tx_manager_to_dbus,
         }
     }
 
@@ -92,8 +120,8 @@ impl StateManager {
                 err_message = rx_err.recv() => {
                     self.parse_error(err_message);
                 }
-                message = self.rx_dbus_service.recv() => {
-                    if let Err(e) = self.parse_dbus_message(message).await {
+                message = self.rx_dbus_to_manager.recv() => {
+                    if let Err(e) = self.parse_state_message(message).await {
                         // TODO: Handle parse errors
                     }
                 }
@@ -141,13 +169,13 @@ impl StateManager {
         Ok(answer)
     }
 
-    async fn parse_dbus_message(
+    async fn parse_state_message(
         &mut self,
-        message: Option<DBusServiceMessage>,
+        message: Option<StateManagerMessage>,
     ) -> Result<()> {
         if let Some(message) = message {
             let answer = match message {
-                DBusServiceMessage::GetGpus { tx: tx_answer } => {
+                StateManagerMessage::GetGpus { tx: tx_answer } => {
                     // Request the device list to the device manager
                     let (tx, rx) = oneshot::channel();
                     let message = DevicesManagerMessage::ListDevices { tx };
@@ -158,9 +186,9 @@ impl StateManager {
                         answer
                     )?;
 
-                    Some((tx_answer, DBusServiceAnswer::Gpus(uuids)))
+                    Some((tx_answer, StateManagerAnswer::Gpus(uuids)))
                 }
-                DBusServiceMessage::GetGpuInfo {
+                StateManagerMessage::GetGpuInfo {
                     uuid,
                     tx: tx_answer,
                 } => {
@@ -174,9 +202,9 @@ impl StateManager {
                         answer
                     )?;
 
-                    Some((tx_answer, DBusServiceAnswer::GpuInfo(device_info)))
+                    Some((tx_answer, StateManagerAnswer::GpuInfo(device_info)))
                 }
-                DBusServiceMessage::GetGpuVendorInfo {
+                StateManagerMessage::GetGpuVendorInfo {
                     uuid,
                     tx: tx_answer,
                 } => {
@@ -192,7 +220,7 @@ impl StateManager {
 
                     Some((
                         tx_answer,
-                        DBusServiceAnswer::GpuVendorInfo(device_vendor_info),
+                        StateManagerAnswer::GpuVendorInfo(device_vendor_info),
                     ))
                 }
             };

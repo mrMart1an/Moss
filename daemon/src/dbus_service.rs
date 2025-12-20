@@ -4,7 +4,7 @@ use anyhow::anyhow;
 use thiserror::Error;
 use tokio::{
     select,
-    sync::{mpsc::Sender, oneshot},
+    sync::{mpsc::{Receiver, Sender}, oneshot},
 };
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, trace};
@@ -12,7 +12,7 @@ use zbus::{Connection, interface};
 
 use crate::{
     errors::MossdError,
-    gpu_device::gpu_info::{GpuInfo, GpuVendorInfo},
+    gpu_device::gpu_info::{GpuInfo, GpuVendorInfo}, state_manager::{StateManagerAnswer, StateManagerMessage},
 };
 
 macro_rules! extract_answer {
@@ -58,26 +58,15 @@ pub enum DbusServiceError {
     },
 }
 
-// This is the message enum that the D-Bus service process will
-// send to the state manger to request data or set properties
+// This is the message enum that the state manager process will
+// send to the D-Bus service to notify it
 pub enum DBusServiceMessage {
-    // Get the UUIDs of all the GPUs on the system
-    GetGpus { tx: Responder },
-
-    // Get the GPU infos
-    GetGpuInfo { uuid: String, tx: Responder },
-    GetGpuVendorInfo { uuid: String, tx: Responder },
+    // Notify the D-Bus service of an error in the daemon
+    NewError(MossdError),
 }
 
-// This is the answer enum that the state manager will use to
-// communicate with the D-Bus service
 #[derive(Debug)]
-pub enum DBusServiceAnswer {
-    Gpus(Vec<String>),
-
-    GpuInfo(GpuInfo),
-    GpuVendorInfo(GpuVendorInfo),
-}
+pub enum DBusServiceAnswer {}
 
 pub struct DBusService;
 
@@ -85,7 +74,7 @@ pub struct DBusService;
 struct GpuInterface {
     uuid: String,
 
-    tx_dbus_service: Sender<DBusServiceMessage>,
+    tx_dbus_to_manager: Sender<StateManagerMessage>,
     tx_err: Sender<MossdError>,
 
     gpu_info: GpuInfo,
@@ -94,17 +83,17 @@ struct GpuInterface {
 impl GpuInterface {
     async fn new(
         uuid: String,
-        tx_dbus_service: Sender<DBusServiceMessage>,
+        tx_dbus_to_manager: Sender<StateManagerMessage>,
         tx_err: Sender<MossdError>,
     ) -> Result<Self> {
         // Get the GPU infos
         let (tx, rx) = oneshot::channel();
-        let message = DBusServiceMessage::GetGpuInfo {
+        let message = StateManagerMessage::GetGpuInfo {
             uuid: uuid.clone(),
             tx,
         };
 
-        tx_dbus_service.send(message).await.map_err(|_| {
+        tx_dbus_to_manager.send(message).await.map_err(|_| {
             DbusServiceError::TX {
                 reason: format!("Failed to send message to state manager"),
             }
@@ -115,12 +104,12 @@ impl GpuInterface {
             error: e.into(),
         })?;
 
-        let gpu_info = extract_answer!(DBusServiceAnswer::GpuInfo, answer)?;
+        let gpu_info = extract_answer!(StateManagerAnswer::GpuInfo, answer)?;
 
         Ok(Self {
             uuid,
 
-            tx_dbus_service,
+            tx_dbus_to_manager,
             tx_err,
 
             gpu_info,
@@ -166,7 +155,7 @@ impl GpuInterface {
 struct NvidiaInterface {
     uuid: String,
 
-    tx_dbus_service: Sender<DBusServiceMessage>,
+    tx_dbus_service: Sender<StateManagerMessage>,
     tx_err: Sender<MossdError>,
 
     gpu_vendor_info: GpuVendorInfo,
@@ -176,7 +165,7 @@ impl NvidiaInterface {
     async fn new(
         uuid: String,
         gpu_vendor_info: GpuVendorInfo,
-        tx_dbus_service: Sender<DBusServiceMessage>,
+        tx_dbus_service: Sender<StateManagerMessage>,
         tx_err: Sender<MossdError>,
     ) -> Result<Self> {
         Ok(Self {
@@ -275,7 +264,10 @@ impl DBusService {
     pub async fn run(
         &mut self,
         run_token: CancellationToken,
-        tx_dbus_service: Sender<DBusServiceMessage>,
+
+        tx_dbus_to_manager: Sender<StateManagerMessage>,
+        mut rx_manager_to_dbus: Receiver<StateManagerMessage>,
+
         tx_err: Sender<MossdError>,
     ) {
         // Connect to the system D-Bus
@@ -305,7 +297,7 @@ impl DBusService {
 
         if let Err(err) = Self::initialize_service(
             &connection,
-            tx_dbus_service,
+            tx_dbus_to_manager,
             tx_err.clone(),
         )
         .await
@@ -320,6 +312,9 @@ impl DBusService {
                 _ = run_token.cancelled() => {
                     info!("DBus service: Quiting");
                     break;
+                },
+                message = rx_manager_to_dbus.recv() => {
+                    
                 }
             }
         }
@@ -327,12 +322,12 @@ impl DBusService {
 
     async fn initialize_service(
         connection: &Connection,
-        tx_dbus_service: Sender<DBusServiceMessage>,
+        tx_dbus_service: Sender<StateManagerMessage>,
         tx_err: Sender<MossdError>,
     ) -> Result<()> {
         // Query the state manager to get a list of the available GPUs
         let (tx, rx) = oneshot::channel();
-        let message = DBusServiceMessage::GetGpus { tx };
+        let message = StateManagerMessage::GetGpus { tx };
 
         tx_dbus_service.send(message).await.map_err(|_| {
             DbusServiceError::TX {
@@ -346,7 +341,7 @@ impl DBusService {
             error: e.into(),
         })?;
 
-        let gpu_uuids = if let DBusServiceAnswer::Gpus(uuids) = answer {
+        let gpu_uuids = if let StateManagerAnswer::Gpus(uuids) = answer {
             Ok(uuids)
         } else {
             Err(DbusServiceError::InvalidResponse {
@@ -393,12 +388,12 @@ impl DBusService {
 
         connection: &Connection,
 
-        tx_dbus: Sender<DBusServiceMessage>,
+        tx_dbus: Sender<StateManagerMessage>,
         tx_err: Sender<MossdError>,
     ) -> Result<()> {
         // Get the GPU vendor infos
         let (tx, rx) = oneshot::channel();
-        let message = DBusServiceMessage::GetGpuVendorInfo {
+        let message = StateManagerMessage::GetGpuVendorInfo {
             uuid: uuid.clone(),
             tx,
         };
@@ -416,7 +411,7 @@ impl DBusService {
         })?;
 
         let gpu_vendor_info =
-            extract_answer!(DBusServiceAnswer::GpuVendorInfo, answer)?;
+            extract_answer!(StateManagerAnswer::GpuVendorInfo, answer)?;
 
         connection
             .object_server()
