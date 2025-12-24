@@ -17,3 +17,23 @@ pub enum MossdError {
     #[error(transparent)]
     DBusService(#[from] DbusServiceError),
 }
+
+impl MossdError {
+    // Return a numeric error code based on the error type
+    pub fn error_code(&self) -> u32 {
+        match self {
+            MossdError::Config(..) => {
+                1
+            }
+            MossdError::DevicesManager(..) => {
+                2
+            }
+            MossdError::StateManager(..) => {
+                3
+            }
+            MossdError::DBusService(..) => {
+                4
+            }
+        }
+    }
+}

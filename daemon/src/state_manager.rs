@@ -1,6 +1,5 @@
 use std::time::Duration;
 
-use anyhow::anyhow;
 use thiserror::Error;
 use tokio::{
     select,
@@ -11,17 +10,21 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 
-use tracing::{error, warn};
+use tracing::error;
 
 use crate::{
     config_manager::{ConfigMessage, ConfigMessageAnswer},
+    dbus_service::DBusServiceMessage,
     devices_manager::{DevicesManagerAnswer, DevicesManagerMessage},
     errors::MossdError,
     fan_curve::{
         fan_curve_info::FanCurveInfo, fan_mode::FanMode,
         hysteresis_curve::HysteresisCurve, linear_curve::LinearCurve,
     },
-    gpu_device::{gpu_config::GpuConfig, gpu_info::{GpuInfo, GpuVendorInfo}},
+    gpu_device::{
+        gpu_config::GpuConfig,
+        gpu_info::{GpuInfo, GpuVendorInfo},
+    },
 };
 
 macro_rules! extract_answer {
@@ -82,7 +85,7 @@ pub struct StateManager {
 
     // D-Bus service channels
     rx_dbus_to_manager: Receiver<StateManagerMessage>,
-    tx_manager_to_dbus: Sender<StateManagerMessage>,
+    tx_manager_to_dbus: Sender<DBusServiceMessage>,
 }
 
 impl StateManager {
@@ -91,7 +94,7 @@ impl StateManager {
         tx_devices_manager: Sender<DevicesManagerMessage>,
 
         rx_dbus_to_manager: Receiver<StateManagerMessage>,
-        tx_manager_to_dbus: Sender<StateManagerMessage>,
+        tx_manager_to_dbus: Sender<DBusServiceMessage>,
     ) -> Self {
         Self {
             tx_config_manager,
@@ -109,7 +112,7 @@ impl StateManager {
     ) {
         // Load and apply the initial configuration
         if let Err(e) = self.apply_settings().await {
-            self.parse_error(Some(e.into()));
+            self.parse_error(Some(e.into())).await;
         }
 
         loop {
@@ -118,11 +121,11 @@ impl StateManager {
                     break;
                 }
                 err_message = rx_err.recv() => {
-                    self.parse_error(err_message);
+                    self.parse_error(err_message).await;
                 }
                 message = self.rx_dbus_to_manager.recv() => {
                     if let Err(e) = self.parse_state_message(message).await {
-                        // TODO: Handle parse errors
+                        self.parse_error(Some(e.into())).await;
                     }
                 }
             }
@@ -417,12 +420,19 @@ impl StateManager {
     }
 
     // Parse and log an error message
-    fn parse_error(&mut self, err_message: Option<MossdError>) {
+    async fn parse_error(&mut self, err_message: Option<MossdError>) {
+        if err_message.is_none() {
+            return;
+        }
+
         // Log the full error chain for each error
-        if let Some(err) = err_message {
-            error!("{}", err);
-        } else {
-            warn!("Parsing empty error message");
+        error!("{}", err_message.as_ref().unwrap());
+
+        // Send the error to the D-Bus service
+        let message = DBusServiceMessage::NewError(err_message.unwrap());
+
+        if let Err(_) = self.tx_manager_to_dbus.send(message).await {
+            error!("Failed to send error message to D-Bus service");
         }
     }
 }

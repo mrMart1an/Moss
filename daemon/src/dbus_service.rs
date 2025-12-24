@@ -1,18 +1,22 @@
-use std::fmt::format;
-
-use anyhow::anyhow;
 use thiserror::Error;
 use tokio::{
     select,
-    sync::{mpsc::{Receiver, Sender}, oneshot},
+    sync::{
+        mpsc::{Receiver, Sender},
+        oneshot,
+    },
 };
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, trace};
-use zbus::{Connection, interface};
+use zbus::{
+    Connection, interface,
+    object_server::{Interface, InterfaceRef, SignalEmitter},
+};
 
 use crate::{
     errors::MossdError,
-    gpu_device::gpu_info::{GpuInfo, GpuVendorInfo}, state_manager::{StateManagerAnswer, StateManagerMessage},
+    gpu_device::gpu_info::{GpuInfo, GpuVendorInfo},
+    state_manager::{StateManagerAnswer, StateManagerMessage},
 };
 
 macro_rules! extract_answer {
@@ -30,6 +34,7 @@ macro_rules! extract_answer {
 }
 
 const SERVICE_NAME: &str = "com.github.Mossd1";
+const ERROR_OBJECT_PATH: &str = "/com/github/Mossd1/Error";
 
 type Responder = oneshot::Sender<DBusServiceAnswer>;
 
@@ -56,6 +61,11 @@ pub enum DbusServiceError {
         reason: String,
         error: anyhow::Error,
     },
+    #[error("DBus service DBus signal error: {reason}")]
+    DBusSignal {
+        reason: String,
+        error: anyhow::Error,
+    },
 }
 
 // This is the message enum that the state manager process will
@@ -68,7 +78,23 @@ pub enum DBusServiceMessage {
 #[derive(Debug)]
 pub enum DBusServiceAnswer {}
 
-pub struct DBusService;
+pub struct DBusService {
+    error_object_path: &'static str,
+}
+
+// Interface of the D-Bus service used for error reporting
+#[derive(Default)]
+struct ErrorInterface {}
+
+#[interface(name = "com.github.Mossd1.Error")]
+impl ErrorInterface {
+    #[zbus(signal)]
+    pub async fn new_error(
+        emitter: &SignalEmitter<'_>,
+        error_code: u32,
+        error: &str,
+    ) -> zbus::Result<()>;
+}
 
 // GPU D-Bus interface
 struct GpuInterface {
@@ -194,9 +220,7 @@ impl NvidiaInterface {
     }
     #[zbus(property)]
     async fn vbios(&self) -> &str {
-        if let GpuVendorInfo::Nvidia { vbios, .. } =
-            &self.gpu_vendor_info
-        {
+        if let GpuVendorInfo::Nvidia { vbios, .. } = &self.gpu_vendor_info {
             vbios
         } else {
             &"VENDOR INFO NOT NVIDIA!"
@@ -205,8 +229,9 @@ impl NvidiaInterface {
 
     #[zbus(property)]
     async fn cuda_core_count(&self) -> u32 {
-        if let GpuVendorInfo::Nvidia { cuda_core_count, .. } =
-            self.gpu_vendor_info
+        if let GpuVendorInfo::Nvidia {
+            cuda_core_count, ..
+        } = self.gpu_vendor_info
         {
             cuda_core_count
         } else {
@@ -216,9 +241,7 @@ impl NvidiaInterface {
 
     #[zbus(property)]
     async fn max_temp(&self) -> u32 {
-        if let GpuVendorInfo::Nvidia { max_temp, .. } =
-            self.gpu_vendor_info
-        {
+        if let GpuVendorInfo::Nvidia { max_temp, .. } = self.gpu_vendor_info {
             max_temp.unwrap_or(0)
         } else {
             0
@@ -226,8 +249,7 @@ impl NvidiaInterface {
     }
     #[zbus(property)]
     async fn mem_max_temp(&self) -> u32 {
-        if let GpuVendorInfo::Nvidia { mem_max_temp, .. } =
-            self.gpu_vendor_info
+        if let GpuVendorInfo::Nvidia { mem_max_temp, .. } = self.gpu_vendor_info
         {
             mem_max_temp.unwrap_or(0)
         } else {
@@ -258,7 +280,9 @@ impl NvidiaInterface {
 
 impl DBusService {
     pub fn new() -> Self {
-        Self {}
+        Self {
+            error_object_path: ERROR_OBJECT_PATH,
+        }
     }
 
     pub async fn run(
@@ -266,7 +290,7 @@ impl DBusService {
         run_token: CancellationToken,
 
         tx_dbus_to_manager: Sender<StateManagerMessage>,
-        mut rx_manager_to_dbus: Receiver<StateManagerMessage>,
+        mut rx_manager_to_dbus: Receiver<DBusServiceMessage>,
 
         tx_err: Sender<MossdError>,
     ) {
@@ -277,16 +301,17 @@ impl DBusService {
             match Connection::session().await {
                 Ok(conn) => conn,
                 Err(err) => {
-                    if let Err(cerr) = tx_err
+                    let channel_error = tx_err
                         .send(DbusServiceError::DBusConnection {
                             reason: format!(
                                 "Failed to establish connection with the bus"
                             ),
                             error: err.into(),
-                        }.into()).await
-                {
-                    error!("Failed to send error over channel: {cerr}")
-                }
+                        }.into()).await;
+
+                    if let Err(cerr) = channel_error {
+                        error!("Failed to send error over channel: {cerr}")
+                    }
 
                     // Just return, there is nothing else to do
                     return;
@@ -295,12 +320,9 @@ impl DBusService {
 
         trace!("DBus connection enstablished");
 
-        if let Err(err) = Self::initialize_service(
-            &connection,
-            tx_dbus_to_manager,
-            tx_err.clone(),
-        )
-        .await
+        if let Err(err) = self
+            .initialize_service(&connection, tx_dbus_to_manager, tx_err.clone())
+            .await
         {
             if let Err(cerr) = tx_err.send(err.into()).await {
                 error!("Failed to send error over channel: {}", cerr);
@@ -314,22 +336,66 @@ impl DBusService {
                     break;
                 },
                 message = rx_manager_to_dbus.recv() => {
-                    
+                    let res = self.parse_manager_message(
+                        &connection,
+                        message
+                    ).await;
+
+                    Self::send_error(res, tx_err.clone()).await;
                 }
             }
         }
     }
 
-    async fn initialize_service(
+    async fn parse_manager_message(
+        &self,
         connection: &Connection,
-        tx_dbus_service: Sender<StateManagerMessage>,
+        message: Option<DBusServiceMessage>,
+    ) -> Result<()> {
+        if message.is_none() {
+            return Ok(());
+        }
+
+        match message.unwrap() {
+            DBusServiceMessage::NewError(error) => {
+                let code = error.error_code();
+                let error_message = format!("{}", error);
+
+                // Send a new error signal
+                let intf_ref = Self::get_dbus_interface_ref::<ErrorInterface>(
+                    &connection,
+                    self.error_object_path,
+                )
+                .await?;
+
+                intf_ref
+                    .signal_emitter()
+                    .new_error(code, &error_message)
+                    .await
+                    .map_err(|e| DbusServiceError::DBusSignal {
+                        reason: format!("Failed to send NewError signal"),
+                        error: e.into(),
+                    })?;
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn initialize_service(
+        &mut self,
+        connection: &Connection,
+        tx_dbus_to_manager: Sender<StateManagerMessage>,
         tx_err: Sender<MossdError>,
     ) -> Result<()> {
+        // Initialize the error interface
+        self.initialize_error_object(connection).await?;
+
         // Query the state manager to get a list of the available GPUs
         let (tx, rx) = oneshot::channel();
         let message = StateManagerMessage::GetGpus { tx };
 
-        tx_dbus_service.send(message).await.map_err(|_| {
+        tx_dbus_to_manager.send(message).await.map_err(|_| {
             DbusServiceError::TX {
                 reason: format!("Failed to send message to state manager"),
             }
@@ -357,11 +423,11 @@ impl DBusService {
 
             let path = format!("/com/github/Mossd1/Gpu{}", gpu_count);
 
-            Self::initialize_object(
+            Self::initialize_gpu_object(
                 path,
                 uuid,
                 connection,
-                tx_dbus_service.clone(),
+                tx_dbus_to_manager.clone(),
                 tx_err.clone(),
             )
             .await?;
@@ -382,7 +448,23 @@ impl DBusService {
         Ok(())
     }
 
-    async fn initialize_object(
+    async fn initialize_error_object(
+        &mut self,
+        connection: &Connection,
+    ) -> Result<()> {
+        connection
+            .object_server()
+            .at(self.error_object_path, ErrorInterface::default())
+            .await
+            .map_err(|e| DbusServiceError::DBusObject {
+                reason: format!("Error while initializing Error object"),
+                error: e.into(),
+            })?;
+
+        Ok(())
+    }
+
+    async fn initialize_gpu_object(
         path: String,
         uuid: String,
 
@@ -452,5 +534,47 @@ impl DBusService {
         }
 
         Ok(())
+    }
+
+    async fn get_dbus_interface_ref<T: Interface>(
+        connection: &Connection,
+        path: &str,
+    ) -> Result<InterfaceRef<T>> {
+        let obj_server = connection.object_server();
+
+        obj_server.interface::<_, T>(path).await.map_err(|e| {
+            DbusServiceError::DBusObject {
+                reason: format!("Failed to get object interface"),
+                error: e.into(),
+            }
+        })
+    }
+
+    async fn send_error<T>(
+        res: Result<T>,
+        tx_err: Sender<MossdError>,
+    ) -> Option<T> {
+        match res {
+            Ok(data) => Some(data),
+            Err(err) => {
+                let channel_error = tx_err
+                    .send(
+                        DbusServiceError::DBusConnection {
+                            reason: format!(
+                                "Failed to establish connection with the bus"
+                            ),
+                            error: err.into(),
+                        }
+                        .into(),
+                    )
+                    .await;
+
+                if let Err(cerr) = channel_error {
+                    error!("Failed to send error over channel: {cerr}")
+                }
+
+                None
+            }
+        }
     }
 }
