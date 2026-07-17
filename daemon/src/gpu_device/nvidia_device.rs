@@ -1,6 +1,5 @@
 use std::{
     sync::Arc,
-    time::{Duration, Instant},
 };
 
 use nvml_wrapper::{
@@ -16,10 +15,12 @@ use tracing::{debug, warn};
 use crate::{
     fan_curve::{FanCurve, fan_mode::FanMode, linear_curve::LinearCurve},
     gpu_device::{
-        DEFAULT_DATA_UPDATE_INTERVAL, DeviceError, GpuDevice, GpuVendor,
+        DeviceError, GpuDevice, GpuVendor,
         Result,
         gpu_config::GpuConfig,
-        gpu_data::{GpuData, GpuVendorData},
+        gpu_data::{
+            GpuData, GpuDataUpdates, GpuVendorData, GpuVendorDataUpdates,
+        },
         gpu_info::{GpuInfo, GpuVendorInfo},
     },
 };
@@ -35,14 +36,9 @@ pub struct NvidiaDevice {
     gpu_info: GpuInfo,
     gpu_vendor_info: GpuVendorInfo,
 
-    // Store the device generic and vendor specific data
-    gpu_data: GpuData,
-    gpu_vendor_data: GpuVendorData,
-
-    // Data update interval
-    gpu_data_update_interval: Duration,
-    // Instant of the last data update
-    gpu_data_last_update: Instant,
+    // Store the device generic and vendor specific last data
+    gpu_data_last: Option<GpuData>,
+    gpu_vendor_data_last: Option<GpuVendorData>,
 
     // Store the current fan mode
     fan_mode: FanMode,
@@ -89,23 +85,8 @@ impl NvidiaDevice {
             )?;
 
         // Obtain the initialization general and vendor specific data
-        let gpu_data = Self::get_gpu_data(&device).map_err(|e| {
-            DeviceError::Initialization {
-                reason: format!("Failed to retrive GPU data for \"{}\"", uuid),
-                error: e.into(),
-            }
-        })?;
-
-        let gpu_vendor_data =
-            Self::get_gpu_vendor_data(&device).map_err(|e| {
-                DeviceError::Initialization {
-                    reason: format!(
-                        "Failed to retrive GPU vendor data for \"{}\"",
-                        uuid
-                    ),
-                    error: e.into(),
-                }
-            })?;
+        let gpu_data_last = None;
+        let gpu_vendor_data_last = None;
 
         // Determine the current fan mode
         // We can't just assume it is automatic, if an old instance of
@@ -139,11 +120,8 @@ impl NvidiaDevice {
             gpu_info,
             gpu_vendor_info,
 
-            gpu_data,
-            gpu_vendor_data,
-
-            gpu_data_update_interval: DEFAULT_DATA_UPDATE_INTERVAL,
-            gpu_data_last_update: Instant::now(),
+            gpu_data_last,
+            gpu_vendor_data_last,
 
             fan_mode,
             fan_curve,
@@ -201,7 +179,11 @@ impl NvidiaDevice {
         })
     }
 
-    fn get_gpu_data<'a, 'b>(device: &'a Device<'b>) -> Result<GpuData> {
+    fn get_gpu_data(
+        &mut self,
+    ) -> Result<(GpuData, GpuDataUpdates)> {
+        let device = self.get_device()?;
+
         // Get the fan speed data
         // TODO: Handle multiples fans
         let mut fan_speed = 0;
@@ -236,7 +218,7 @@ impl NvidiaDevice {
             warn!("Failed to fetch GPU memory info");
         }
 
-        Ok(GpuData {
+        let gpu_data = GpuData {
             temp_gpu: device.temperature(TemperatureSensor::Gpu)?,
 
             graphics_freq: device.clock(Clock::Graphics, ClockId::Current)?,
@@ -257,13 +239,27 @@ impl NvidiaDevice {
             total_memory,
             used_memory,
             free_memory,
-        })
+        };
+
+        // Generate Updates data
+        let updates = if let Some(last) = &self.gpu_data_last {
+            gpu_data.updated_from(last)
+        } else {
+            gpu_data.updated_from(&GpuData::default())
+        };
+
+        // Update last data
+        self.gpu_data_last = Some(gpu_data.clone());
+
+        Ok((gpu_data, updates))
     }
 
-    fn get_gpu_vendor_data<'a, 'b>(
-        device: &'a Device<'b>,
-    ) -> Result<GpuVendorData> {
-        Ok(GpuVendorData::Nvidia {
+    fn get_gpu_vendor_data(
+        &mut self,
+    ) -> Result<(GpuVendorData, GpuVendorDataUpdates)> {
+        let device = self.get_device()?;
+
+        let gpu_vendor_data = GpuVendorData::Nvidia {
             sm_freq: Self::ok_support(
                 device.clock(Clock::SM, ClockId::Current),
             )?,
@@ -283,22 +279,19 @@ impl NvidiaDevice {
             video_boost_freq: Self::ok_support(
                 device.clock(Clock::Video, ClockId::CustomerMaxBoost),
             )?,
-        })
-    }
+        };
 
-    // Update the device data only if GPU update interval has elapsed
-    fn udpate_data(&mut self) -> Result<()> {
-        let time_elapsed = self.gpu_data_last_update.elapsed();
+        // Generate Updates data
+        let updates = if let Some(last) = &self.gpu_vendor_data_last {
+            gpu_vendor_data.updated_from(last)
+        } else {
+            gpu_vendor_data.updated_from(&GpuVendorData::default())
+        };
 
-        if time_elapsed >= self.gpu_data_update_interval {
-            self.gpu_data = Self::get_gpu_data(&self.get_device()?)?;
-            self.gpu_vendor_data =
-                Self::get_gpu_vendor_data(&self.get_device()?)?;
+        // Update last data
+        self.gpu_vendor_data_last = Some(gpu_vendor_data.clone());
 
-            self.gpu_data_last_update = Instant::now();
-        }
-
-        Ok(())
+        Ok((gpu_vendor_data, updates))
     }
 
     // If the given result is Ok(T) return Ok(Some(T))
@@ -429,20 +422,16 @@ impl GpuDevice for NvidiaDevice {
     // Return the device vendor specific real time data,
     // the update frequency is controlled by the set_update_freq function,
     // the default update frequency is 1 hertz
-    fn get_vendor_data(&mut self) -> Result<GpuVendorData> {
-        self.udpate_data()?;
-        Ok(self.gpu_vendor_data.clone())
+    fn get_vendor_data(
+        &mut self,
+    ) -> Result<(GpuVendorData, GpuVendorDataUpdates)> {
+        self.get_gpu_vendor_data()
     }
     // Return the device general real time data
     // the update frequency is controlled by the set_update_freq function,
     // the default update frequency is 1 hertz
-    fn get_data(&mut self) -> Result<GpuData> {
-        self.udpate_data()?;
-        Ok(self.gpu_data.clone())
-    }
-    // Change the vendor and general data update frequency
-    fn set_data_update_interval(&mut self, update_interval: Duration) {
-        self.gpu_data_update_interval = update_interval;
+    fn get_data(&mut self) -> Result<(GpuData, GpuDataUpdates)> {
+        self.get_gpu_data()
     }
 
     // Apply the given GPU configuration to the device

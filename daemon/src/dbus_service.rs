@@ -15,8 +15,11 @@ use zbus::{
 
 use crate::{
     errors::MossdError,
-    gpu_device::gpu_info::{GpuInfo, GpuVendorInfo},
-    state_manager::{StateManagerAnswer, StateManagerMessage},
+    gpu_device::{
+        gpu_data::{GpuData, GpuVendorData},
+        gpu_info::{GpuInfo, GpuVendorInfo},
+    },
+    state_manager::{DbusToManagerAnswer, DbusToManagerMessage},
 };
 
 macro_rules! extract_answer {
@@ -100,7 +103,7 @@ impl ErrorInterface {
 struct GpuInterface {
     uuid: String,
 
-    tx_dbus_to_manager: Sender<StateManagerMessage>,
+    tx_dbus_to_manager: Sender<DbusToManagerMessage>,
     tx_err: Sender<MossdError>,
 
     gpu_info: GpuInfo,
@@ -109,12 +112,12 @@ struct GpuInterface {
 impl GpuInterface {
     async fn new(
         uuid: String,
-        tx_dbus_to_manager: Sender<StateManagerMessage>,
+        tx_dbus_to_manager: Sender<DbusToManagerMessage>,
         tx_err: Sender<MossdError>,
     ) -> Result<Self> {
         // Get the GPU infos
         let (tx, rx) = oneshot::channel();
-        let message = StateManagerMessage::GetGpuInfo {
+        let message = DbusToManagerMessage::GetGpuInfo {
             uuid: uuid.clone(),
             tx,
         };
@@ -130,7 +133,7 @@ impl GpuInterface {
             error: e.into(),
         })?;
 
-        let gpu_info = extract_answer!(StateManagerAnswer::GpuInfo, answer)?;
+        let gpu_info = extract_answer!(DbusToManagerAnswer::GpuInfo, answer)?;
 
         Ok(Self {
             uuid,
@@ -140,6 +143,79 @@ impl GpuInterface {
 
             gpu_info,
         })
+    }
+
+    async fn get_gpu_data(&self) -> Result<GpuData> {
+        // Get the GPU infos
+        let (tx, rx) = oneshot::channel();
+        let message = DbusToManagerMessage::GetGpuData {
+            uuid: self.uuid.clone(),
+            tx,
+        };
+
+        self.tx_dbus_to_manager.send(message).await.map_err(|_| {
+            DbusServiceError::TX {
+                reason: format!("Failed to send message to state manager"),
+            }
+        })?;
+
+        let answer = rx.await.map_err(|e| DbusServiceError::RX {
+            reason: format!("Failed to receive answer from state manager"),
+            error: e.into(),
+        })?;
+
+        let gpu_data = extract_answer!(DbusToManagerAnswer::GpuData, answer)?;
+
+        // Return a default GpuData if an error in the device manager occurred
+        if let Some(data) = gpu_data {
+            Ok(data)
+        } else {
+            Ok(GpuData::default())
+        }
+    }
+    async fn get_gpu_vendor_data(&self) -> Result<GpuVendorData> {
+        // Get the GPU infos
+        let (tx, rx) = oneshot::channel();
+        let message = DbusToManagerMessage::GetGpuVendorData {
+            uuid: self.uuid.clone(),
+            tx,
+        };
+
+        self.tx_dbus_to_manager.send(message).await.map_err(|_| {
+            DbusServiceError::TX {
+                reason: format!("Failed to send message to state manager"),
+            }
+        })?;
+
+        let answer = rx.await.map_err(|e| DbusServiceError::RX {
+            reason: format!("Failed to receive answer from state manager"),
+            error: e.into(),
+        })?;
+
+        let gpu_vendor_data =
+            extract_answer!(DbusToManagerAnswer::GpuVendorData, answer)?;
+
+        // Return a default GpuData if an error in the device manager occurred
+        if let Some(data) = gpu_vendor_data {
+            Ok(data)
+        } else {
+            Ok(GpuVendorData::default())
+        }
+    }
+
+    // Fetch the GPU data
+    async fn get_data(&self) -> GpuData {
+        let gpu_data = self.get_gpu_data().await;
+
+        if let Err(e) = gpu_data {
+            if let Err(tx_err) = self.tx_err.send(e.into()).await {
+                error!("Failed to send error on the errors channel: {}", tx_err)
+            }
+
+            GpuData::default()
+        } else {
+            gpu_data.unwrap()
+        }
     }
 }
 
@@ -176,12 +252,90 @@ impl GpuInterface {
     async fn power_limit_default(&self) -> u32 {
         self.gpu_info.power_limit_default
     }
+
+    // GPU data properties
+    #[zbus(property)]
+    async fn temperature(&self) -> u32 {
+        let data = self.get_data().await;
+        data.temp_gpu
+    }
+
+    #[zbus(property)]
+    async fn graphics_frequency(&self) -> u32 {
+        let data = self.get_data().await;
+        data.graphics_freq
+    }
+    #[zbus(property)]
+    async fn memory_frequency(&self) -> u32 {
+        let data = self.get_data().await;
+        data.mem_freq
+    }
+
+    #[zbus(property)]
+    async fn core_clock_offset(&self) -> i32 {
+        let data = self.get_data().await;
+        data.core_clock_offset
+    }
+    #[zbus(property)]
+    async fn memory_clock_offset(&self) -> i32 {
+        let data = self.get_data().await;
+        data.mem_clock_offset
+    }
+
+    #[zbus(property)]
+    async fn power_usage(&self) -> u32 {
+        let data = self.get_data().await;
+        data.power_usage
+    }
+    #[zbus(property)]
+    async fn power_limit(&self) -> u32 {
+        let data = self.get_data().await;
+        data.power_limit
+    }
+
+    #[zbus(property)]
+    async fn fan_speed(&self) -> u32 {
+        let data = self.get_data().await;
+        data.fan_speed
+    }
+    #[zbus(property)]
+    async fn fan_speed_rpm(&self) -> u32 {
+        let data = self.get_data().await;
+        data.fan_speed_rpm
+    }
+
+    #[zbus(property)]
+    async fn core_usage(&self) -> u32 {
+        let data = self.get_data().await;
+        data.core_usage
+    }
+    #[zbus(property)]
+    async fn memory_usage(&self) -> u32 {
+        let data = self.get_data().await;
+        data.mem_usage
+    }
+
+    #[zbus(property)]
+    async fn total_memory(&self) -> u64 {
+        let data = self.get_data().await;
+        data.total_memory
+    }
+    #[zbus(property)]
+    async fn used_memory(&self) -> u64 {
+        let data = self.get_data().await;
+        data.used_memory
+    }
+    #[zbus(property)]
+    async fn free_memory(&self) -> u64 {
+        let data = self.get_data().await;
+        data.free_memory
+    }
 }
 
 struct NvidiaInterface {
     uuid: String,
 
-    tx_dbus_service: Sender<StateManagerMessage>,
+    tx_dbus_service: Sender<DbusToManagerMessage>,
     tx_err: Sender<MossdError>,
 
     gpu_vendor_info: GpuVendorInfo,
@@ -191,7 +345,7 @@ impl NvidiaInterface {
     async fn new(
         uuid: String,
         gpu_vendor_info: GpuVendorInfo,
-        tx_dbus_service: Sender<StateManagerMessage>,
+        tx_dbus_service: Sender<DbusToManagerMessage>,
         tx_err: Sender<MossdError>,
     ) -> Result<Self> {
         Ok(Self {
@@ -289,7 +443,7 @@ impl DBusService {
         &mut self,
         run_token: CancellationToken,
 
-        tx_dbus_to_manager: Sender<StateManagerMessage>,
+        tx_dbus_to_manager: Sender<DbusToManagerMessage>,
         mut rx_manager_to_dbus: Receiver<DBusServiceMessage>,
 
         tx_err: Sender<MossdError>,
@@ -385,7 +539,7 @@ impl DBusService {
     async fn initialize_service(
         &mut self,
         connection: &Connection,
-        tx_dbus_to_manager: Sender<StateManagerMessage>,
+        tx_dbus_to_manager: Sender<DbusToManagerMessage>,
         tx_err: Sender<MossdError>,
     ) -> Result<()> {
         // Initialize the error interface
@@ -393,7 +547,7 @@ impl DBusService {
 
         // Query the state manager to get a list of the available GPUs
         let (tx, rx) = oneshot::channel();
-        let message = StateManagerMessage::GetGpus { tx };
+        let message = DbusToManagerMessage::GetGpus { tx };
 
         tx_dbus_to_manager.send(message).await.map_err(|_| {
             DbusServiceError::TX {
@@ -407,7 +561,7 @@ impl DBusService {
             error: e.into(),
         })?;
 
-        let gpu_uuids = if let StateManagerAnswer::Gpus(uuids) = answer {
+        let gpu_uuids = if let DbusToManagerAnswer::Gpus(uuids) = answer {
             Ok(uuids)
         } else {
             Err(DbusServiceError::InvalidResponse {
@@ -470,12 +624,12 @@ impl DBusService {
 
         connection: &Connection,
 
-        tx_dbus: Sender<StateManagerMessage>,
+        tx_dbus: Sender<DbusToManagerMessage>,
         tx_err: Sender<MossdError>,
     ) -> Result<()> {
         // Get the GPU vendor infos
         let (tx, rx) = oneshot::channel();
-        let message = StateManagerMessage::GetGpuVendorInfo {
+        let message = DbusToManagerMessage::GetGpuVendorInfo {
             uuid: uuid.clone(),
             tx,
         };
@@ -493,7 +647,7 @@ impl DBusService {
         })?;
 
         let gpu_vendor_info =
-            extract_answer!(StateManagerAnswer::GpuVendorInfo, answer)?;
+            extract_answer!(DbusToManagerAnswer::GpuVendorInfo, answer)?;
 
         connection
             .object_server()

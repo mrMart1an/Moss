@@ -12,7 +12,9 @@ use crate::{
     fan_curve::{FanCurve, fan_mode::FanMode},
     gpu_device::{
         gpu_config::GpuConfig,
-        gpu_data::{GpuData, GpuVendorData},
+        gpu_data::{
+            GpuData, GpuDataUpdates, GpuVendorData, GpuVendorDataUpdates,
+        },
         gpu_info::{GpuInfo, GpuVendorInfo},
     },
 };
@@ -45,7 +47,7 @@ pub enum DeviceError {
     DeviceFanError {
         reason: String,
         error: anyhow::Error,
-    }
+    },
 }
 
 pub enum GpuVendor {
@@ -75,13 +77,13 @@ pub trait GpuDevice {
     // Return the device vendor specific real time data,
     // the update frequency is controlled by the set_update_freq function,
     // the default update frequency is 1 hertz
-    fn get_vendor_data(&mut self) -> Result<GpuVendorData>;
+    fn get_vendor_data(
+        &mut self,
+    ) -> Result<(GpuVendorData, GpuVendorDataUpdates)>;
     // Return the device general real time data
     // the update frequency is controlled by the set_data_update_interval
     // function, the default update frequency is 1 hertz
-    fn get_data(&mut self) -> Result<GpuData>;
-    // Change the vendor and general data update interval
-    fn set_data_update_interval(&mut self, update_interval: Duration);
+    fn get_data(&mut self) -> Result<(GpuData, GpuDataUpdates)>;
 
     // Apply the given GPU configuration to the device
     // The configuration vendor must match the

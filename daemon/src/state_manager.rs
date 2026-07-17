@@ -15,15 +15,14 @@ use tracing::error;
 use crate::{
     config_manager::{ConfigMessage, ConfigMessageAnswer},
     dbus_service::DBusServiceMessage,
-    devices_manager::{DevicesManagerAnswer, DevicesManagerMessage},
+    devices_manager::{DevicesToStateAnswer, DevicesToStateMessage},
     errors::MossdError,
     fan_curve::{
         fan_curve_info::FanCurveInfo, fan_mode::FanMode,
         hysteresis_curve::HysteresisCurve, linear_curve::LinearCurve,
     },
     gpu_device::{
-        gpu_config::GpuConfig,
-        gpu_info::{GpuInfo, GpuVendorInfo},
+        gpu_config::GpuConfig, gpu_data::{GpuData, GpuVendorData}, gpu_info::{GpuInfo, GpuVendorInfo}
     },
 };
 
@@ -43,7 +42,7 @@ macro_rules! extract_answer {
 
 type Result<T> = std::result::Result<T, StateManagerError>;
 
-type Responder = oneshot::Sender<StateManagerAnswer>;
+type Responder = oneshot::Sender<DbusToManagerAnswer>;
 
 #[derive(Debug, Error)]
 pub enum StateManagerError {
@@ -60,40 +59,47 @@ pub enum StateManagerError {
 
 // This is the message enum that the D-Bus service process will
 // send to the state manger to request data or set properties
-pub enum StateManagerMessage {
+pub enum DbusToManagerMessage {
     // Get the UUIDs of all the GPUs on the system
     GetGpus { tx: Responder },
 
-    // Get the GPU infos
+    // Get the GPUs infos
     GetGpuInfo { uuid: String, tx: Responder },
     GetGpuVendorInfo { uuid: String, tx: Responder },
+
+    // Get the GPUs data
+    GetGpuData { uuid: String, tx: Responder },
+    GetGpuVendorData { uuid: String, tx: Responder },
 }
 
 // This is the answer enum that the state manager will use to
 // communicate with the D-Bus service
 #[derive(Debug)]
-pub enum StateManagerAnswer {
+pub enum DbusToManagerAnswer {
     Gpus(Vec<String>),
 
     GpuInfo(GpuInfo),
     GpuVendorInfo(GpuVendorInfo),
+
+    GpuData(Option<GpuData>),
+    GpuVendorData(Option<GpuVendorData>),
 }
 
 pub struct StateManager {
     tx_config_manager: Sender<ConfigMessage>,
-    tx_devices_manager: Sender<DevicesManagerMessage>,
+    tx_devices_manager: Sender<DevicesToStateMessage>,
 
     // D-Bus service channels
-    rx_dbus_to_manager: Receiver<StateManagerMessage>,
+    rx_dbus_to_manager: Receiver<DbusToManagerMessage>,
     tx_manager_to_dbus: Sender<DBusServiceMessage>,
 }
 
 impl StateManager {
     pub fn new(
         tx_config_manager: Sender<ConfigMessage>,
-        tx_devices_manager: Sender<DevicesManagerMessage>,
+        tx_devices_manager: Sender<DevicesToStateMessage>,
 
-        rx_dbus_to_manager: Receiver<StateManagerMessage>,
+        rx_dbus_to_manager: Receiver<DbusToManagerMessage>,
         tx_manager_to_dbus: Sender<DBusServiceMessage>,
     ) -> Self {
         Self {
@@ -135,9 +141,9 @@ impl StateManager {
     // Send a query to the device manager
     async fn query_device_manager(
         &mut self,
-        message: DevicesManagerMessage,
-        rx: oneshot::Receiver<DevicesManagerAnswer>,
-    ) -> Result<DevicesManagerAnswer> {
+        message: DevicesToStateMessage,
+        rx: oneshot::Receiver<DevicesToStateAnswer>,
+    ) -> Result<DevicesToStateAnswer> {
         self.tx_devices_manager.send(message).await.map_err(|_| {
             StateManagerError::TX {
                 reason: format!("Failed to send request to devices manager"),
@@ -174,56 +180,94 @@ impl StateManager {
 
     async fn parse_state_message(
         &mut self,
-        message: Option<StateManagerMessage>,
+        message: Option<DbusToManagerMessage>,
     ) -> Result<()> {
         if let Some(message) = message {
             let answer = match message {
-                StateManagerMessage::GetGpus { tx: tx_answer } => {
+                DbusToManagerMessage::GetGpus { tx: tx_answer } => {
                     // Request the device list to the device manager
                     let (tx, rx) = oneshot::channel();
-                    let message = DevicesManagerMessage::ListDevices { tx };
+                    let message = DevicesToStateMessage::ListDevices { tx };
                     let answer = self.query_device_manager(message, rx).await?;
 
                     let uuids = extract_answer!(
-                        DevicesManagerAnswer::DeviceList,
+                        DevicesToStateAnswer::DeviceList,
                         answer
                     )?;
 
-                    Some((tx_answer, StateManagerAnswer::Gpus(uuids)))
+                    Some((tx_answer, DbusToManagerAnswer::Gpus(uuids)))
                 }
-                StateManagerMessage::GetGpuInfo {
+                DbusToManagerMessage::GetGpuInfo {
                     uuid,
                     tx: tx_answer,
                 } => {
                     let (tx, rx) = oneshot::channel();
                     let message =
-                        DevicesManagerMessage::GetDeviceInfo { uuid, tx };
+                        DevicesToStateMessage::GetDeviceInfo { uuid, tx };
                     let answer = self.query_device_manager(message, rx).await?;
 
                     let device_info = extract_answer!(
-                        DevicesManagerAnswer::DeviceInfo,
+                        DevicesToStateAnswer::DeviceInfo,
                         answer
                     )?;
 
-                    Some((tx_answer, StateManagerAnswer::GpuInfo(device_info)))
+                    Some((tx_answer, DbusToManagerAnswer::GpuInfo(device_info)))
                 }
-                StateManagerMessage::GetGpuVendorInfo {
+                DbusToManagerMessage::GetGpuVendorInfo {
                     uuid,
                     tx: tx_answer,
                 } => {
                     let (tx, rx) = oneshot::channel();
                     let message =
-                        DevicesManagerMessage::GetDeviceVendorInfo { uuid, tx };
+                        DevicesToStateMessage::GetDeviceVendorInfo { uuid, tx };
                     let answer = self.query_device_manager(message, rx).await?;
 
                     let device_vendor_info = extract_answer!(
-                        DevicesManagerAnswer::DeviceVendorInfo,
+                        DevicesToStateAnswer::DeviceVendorInfo,
                         answer
                     )?;
 
                     Some((
                         tx_answer,
-                        StateManagerAnswer::GpuVendorInfo(device_vendor_info),
+                        DbusToManagerAnswer::GpuVendorInfo(device_vendor_info),
+                    ))
+                }
+                DbusToManagerMessage::GetGpuData {
+                    uuid,
+                    tx: tx_answer,
+                } => {
+                    let (tx, rx) = oneshot::channel();
+                    let message =
+                        DevicesToStateMessage::GetDeviceData { uuid, tx };
+                    let answer = self.query_device_manager(message, rx).await?;
+
+                    let device_data = extract_answer!(
+                        DevicesToStateAnswer::DeviceData,
+                        answer
+                    )?;
+
+                    Some((
+                        tx_answer,
+                        DbusToManagerAnswer::GpuData(device_data),
+                    ))
+                }
+                DbusToManagerMessage::GetGpuVendorData {
+                    uuid,
+                    tx: tx_answer,
+                } => {
+                    let (tx, rx) = oneshot::channel();
+                    let message =
+                        DevicesToStateMessage::GetDeviceVendorData { uuid, tx };
+                    let answer = self.query_device_manager(message, rx).await?;
+
+                    let device_vendor_data = extract_answer!(
+                        DevicesToStateAnswer::DeviceVendorData,
+                        answer
+                    )?;
+
+                    Some((
+                        tx_answer,
+                        DbusToManagerAnswer::GpuVendorData(device_vendor_data),
                     ))
                 }
             };
@@ -247,12 +291,12 @@ impl StateManager {
 
         let answer = self
             .query_device_manager(
-                DevicesManagerMessage::ListDevices { tx: answer_tx },
+                DevicesToStateMessage::ListDevices { tx: answer_tx },
                 answer_rx,
             )
             .await?;
 
-        let uuids = extract_answer!(DevicesManagerAnswer::DeviceList, answer)?;
+        let uuids = extract_answer!(DevicesToStateAnswer::DeviceList, answer)?;
 
         // Request and apply the configuration information for every GPUs
         for uuid in uuids {
@@ -323,7 +367,7 @@ impl StateManager {
         uuid: &str,
         fan_mode: FanMode,
     ) -> Result<()> {
-        let message = DevicesManagerMessage::SetDeviceFanMode {
+        let message = DevicesToStateMessage::SetDeviceFanMode {
             uuid: uuid.to_string(),
             fan_mode,
         };
@@ -352,7 +396,7 @@ impl StateManager {
                 HysteresisCurve::<LinearCurve>::from_info(&fan_curve_info),
             );
 
-            let message = DevicesManagerMessage::SetDeviceFanCurve {
+            let message = DevicesToStateMessage::SetDeviceFanCurve {
                 uuid: uuid.to_string(),
                 fan_curve,
             };
@@ -377,7 +421,7 @@ impl StateManager {
         // Only apply fan update interval settings if the config manager
         // returned a duration value
         if let Some(interval) = update_interval_opt {
-            let message = DevicesManagerMessage::SetDeviceFanUpdateInterval {
+            let message = DevicesToStateMessage::SetDeviceFanUpdateInterval {
                 uuid: uuid.to_string(),
                 interval,
             };
@@ -402,7 +446,7 @@ impl StateManager {
         // Only apply config settings if the config manager
         // returned a config profile
         if let Some(config) = config_opt {
-            let message = DevicesManagerMessage::ApplyDeviceGpuConfig {
+            let message = DevicesToStateMessage::ApplyDeviceGpuConfig {
                 uuid: uuid.to_string(),
                 config,
             };
