@@ -27,13 +27,6 @@ use crate::{
     },
 };
 
-const DEFAULT_PROFILE_NAME: &str = "default";
-
-const GPUS_JSON: &str = "gpus";
-const FAN_CURVES_JSON: &str = "fan_curves";
-const PROFILES_JSON: &str = "profiles";
-const CONFIGS_JSON: &str = "configs";
-
 // Alias the result type for this module
 type Result<T> = std::result::Result<T, ConfigError>;
 
@@ -303,10 +296,7 @@ impl ConfigManager {
 
                 return Ok(());
             }
-            ConfigMessage::SetProfileDeviceConfig {
-                profile,
-                config,
-            } => {
+            ConfigMessage::SetProfileDeviceConfig { profile, config } => {
                 let profile_config =
                     self.config.profile_configs.get_mut(&profile);
 
@@ -381,13 +371,13 @@ impl ConfigManager {
 
             _ => {
                 return Err(ConfigError::Get {
-                    reason: format!("Trying to parse unknow message"),
+                    reason: format!("Trying to parse unknown message"),
                 });
             }
         };
 
         tx.send(answer).map_err(|_| ConfigError::TxError {
-            reason: format!("Failed to send answer on oneshot channel"),
+            reason: format!("Failed to send answer on one shot channel"),
         })?;
 
         Ok(())
