@@ -1,6 +1,4 @@
-use std::{
-    sync::Arc,
-};
+use std::sync::Arc;
 
 use nvml_wrapper::{
     Device, Nvml,
@@ -15,9 +13,8 @@ use tracing::{debug, warn};
 use crate::{
     fan_curve::{FanCurve, fan_mode::FanMode, linear_curve::LinearCurve},
     gpu_device::{
-        DeviceError, GpuDevice, GpuVendor,
-        Result,
-        gpu_config::GpuConfig,
+        DeviceError, GpuDevice, GpuVendor, Result,
+        gpu_config::{GpuConfig, GpuVendorConfig},
         gpu_data::{
             GpuData, GpuDataUpdates, GpuVendorData, GpuVendorDataUpdates,
         },
@@ -179,9 +176,7 @@ impl NvidiaDevice {
         })
     }
 
-    fn get_gpu_data(
-        &mut self,
-    ) -> Result<(GpuData, GpuDataUpdates)> {
+    fn get_gpu_data(&mut self) -> Result<(GpuData, GpuDataUpdates)> {
         let device = self.get_device()?;
 
         // Get the fan speed data
@@ -458,11 +453,17 @@ impl GpuDevice for NvidiaDevice {
         }
 
         // Set vendor specific config
-        if let Some(offset) = gpu_config.nvidia_config.core_clock_offset {
-            device.set_gpc_clock_vf_offset(offset)?;
-        }
-        if let Some(offset) = gpu_config.nvidia_config.mem_clock_offset {
-            device.set_mem_clock_vf_offset(offset)?;
+        if let GpuVendorConfig::Nvidia {
+            core_clock_offset,
+            mem_clock_offset,
+        } = gpu_config.vendor_config
+        {
+            if let Some(offset) = core_clock_offset {
+                device.set_gpc_clock_vf_offset(offset)?;
+            }
+            if let Some(offset) = mem_clock_offset {
+                device.set_mem_clock_vf_offset(offset)?;
+            }
         }
 
         Ok(())

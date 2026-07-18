@@ -1,5 +1,7 @@
+use serde::{Deserialize, Serialize};
+
 // Store the data required to create an hysteresis fan curve
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Serialize, Deserialize, Default, Clone)]
 pub struct FanCurveInfo {
     pub points: Vec<(i32, u8)>,
 

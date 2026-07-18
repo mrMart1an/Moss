@@ -1,5 +1,7 @@
+use serde::{Deserialize, Serialize};
+
 // Device fan mode
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Serialize, Deserialize, Clone, Copy)]
 pub enum FanMode {
     Auto,
     Curve,
