@@ -6,8 +6,6 @@ pub mod nvidia_device;
 
 use std::time::Duration;
 
-use thiserror::Error;
-
 use crate::{
     fan_curve::{FanCurve, fan_mode::FanMode},
     gpu_device::{
@@ -24,31 +22,7 @@ pub const DEFAULT_DATA_UPDATE_INTERVAL: Duration = Duration::from_secs(1);
 pub const DEFAULT_FAN_UPDATE_INTERVAL: Duration = Duration::from_secs(3);
 
 // Alias the result type for this module
-pub type Result<T> = std::result::Result<T, DeviceError>;
-
-#[derive(Debug, Error)]
-pub enum DeviceError {
-    #[error("Device initialization error: {reason} - {error}")]
-    Initialization {
-        reason: String,
-        error: anyhow::Error,
-    },
-    #[error("Device acquisition error: {reason} - {error}")]
-    DeviceAcquisition {
-        reason: String,
-        error: anyhow::Error,
-    },
-    #[error("Device internal error: {reason} - {error}")]
-    DeviceInternal {
-        reason: String,
-        error: anyhow::Error,
-    },
-    #[error("Device fan error: {reason} - {error}")]
-    DeviceFanError {
-        reason: String,
-        error: anyhow::Error,
-    },
-}
+pub type Result<T> = std::result::Result<T, anyhow::Error>;
 
 pub enum GpuVendor {
     Nvidia,
@@ -87,5 +61,5 @@ pub trait GpuDevice {
 
     // Apply the given GPU configuration to the device
     // The configuration vendor must match the
-    fn apply_gpu_config(&mut self, gpu_config: GpuConfig) -> Result<()>;
+    fn set_device_config(&mut self, gpu_config: GpuConfig) -> Result<()>;
 }

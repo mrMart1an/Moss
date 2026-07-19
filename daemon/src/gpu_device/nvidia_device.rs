@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use anyhow::{Context, anyhow};
 use nvml_wrapper::{
     Device, Nvml,
     enum_wrappers::device::{
@@ -11,9 +12,9 @@ use nvml_wrapper::{
 use tracing::{debug, warn};
 
 use crate::{
-    fan_curve::{FanCurve, fan_mode::FanMode, linear_curve::LinearCurve},
+    fan_curve::{FanCurve, fan_mode::FanMode},
     gpu_device::{
-        DeviceError, GpuDevice, GpuVendor, Result,
+        GpuDevice, GpuVendor, Result,
         gpu_config::{GpuConfig, GpuVendorConfig},
         gpu_data::{
             GpuData, GpuDataUpdates, GpuVendorData, GpuVendorDataUpdates,
@@ -40,46 +41,31 @@ pub struct NvidiaDevice {
     // Store the current fan mode
     fan_mode: FanMode,
     // Fan curve to apply in curve mode
-    fan_curve: Box<dyn FanCurve + Send>,
+    fan_curve: Option<Box<dyn FanCurve + Send>>,
 }
 
 impl NvidiaDevice {
     pub fn new(nvml: Arc<Nvml>, uuid: &str) -> Result<Self> {
-        let device = nvml.device_by_uuid(uuid).map_err(|e| {
-            DeviceError::Initialization {
-                reason: format!("Failed to retrive GPU device \"{}\"", uuid),
-                error: e.into(),
-            }
+        let device = nvml.device_by_uuid(uuid).with_context(|| {
+            format!("Failed to retrive GPU device \"{}\"", uuid)
         })?;
 
         // Obtain the device informations
-        let gpu_info = Self::get_gpu_info(&device).map_err(|e| {
-            DeviceError::Initialization {
-                reason: format!("Failed to retrive GPU info for \"{}\"", uuid),
-                error: e.into(),
-            }
+        let gpu_info = Self::get_gpu_info(&device).with_context(|| {
+            format!("Failed to retrive GPU info for \"{}\"", uuid)
         })?;
 
-        let driver_version = nvml.sys_driver_version().map_err(|e| {
-            DeviceError::Initialization {
-                reason: format!(
-                    "Failed to retrive GPU driver version for \"{}\"",
-                    uuid
-                ),
-                error: e.into(),
-            }
+        let driver_version = nvml.sys_driver_version().with_context(|| {
+            format!("Failed to retrive GPU driver version for \"{}\"", uuid)
         })?;
 
-        let gpu_vendor_info =
-            Self::get_gpu_vendor_info(driver_version, &device).map_err(
-                |e| DeviceError::Initialization {
-                    reason: format!(
-                        "Failed to retrive GPU vendor info for \"{}\"",
-                        uuid
-                    ),
-                    error: e.into(),
-                },
-            )?;
+        let gpu_vendor_info = Self::get_gpu_vendor_info(
+            driver_version,
+            &device,
+        )
+        .with_context(|| {
+            format!("Failed to retrive GPU vendor info for \"{}\"", uuid)
+        })?;
 
         // Obtain the initialization general and vendor specific data
         let gpu_data_last = None;
@@ -89,26 +75,19 @@ impl NvidiaDevice {
         // We can't just assume it is automatic, if an old instance of
         // the program changed it and crashed if could still be manual
         // TODO: Handle multiple fan
-        let control_policy = device.fan_control_policy(0).map_err(|e| {
-            DeviceError::Initialization {
-                reason: format!(
-                    "Failed to retrive fan control policy for \"{}\"",
-                    uuid
-                ),
-                error: e.into(),
-            }
-        })?;
+        let control_policy =
+            device.fan_control_policy(0).with_context(|| {
+                format!("Failed to retrive fan control policy for \"{}\"", uuid)
+            })?;
 
         let fan_mode =
             if control_policy == FanControlPolicy::TemperatureContinousSw {
                 FanMode::Auto
             } else {
-                FanMode::Curve
-            };
+                let current_speed = device.fan_speed(0)?;
 
-        // Generate a default fan curve always at 100% fan speed
-        let mut fan_curve = Box::new(LinearCurve::new(&Vec::new()));
-        fan_curve.add_point((0, 100).into());
+                FanMode::Manual(current_speed as u8)
+            };
 
         Ok(Self {
             nvml: nvml.clone(),
@@ -121,7 +100,7 @@ impl NvidiaDevice {
             gpu_vendor_data_last,
 
             fan_mode,
-            fan_curve,
+            fan_curve: None,
         })
     }
 
@@ -130,11 +109,8 @@ impl NvidiaDevice {
     fn get_device<'a>(&'a self) -> Result<Device<'a>> {
         let uuid = self.uuid.as_str();
 
-        self.nvml.device_by_uuid(uuid).map_err(|e| {
-            DeviceError::DeviceAcquisition {
-                reason: format!("Failed to retrive GPU device \"{}\"", uuid),
-                error: e.into(),
-            }
+        self.nvml.device_by_uuid(uuid).with_context(|| {
+            format!("Failed to retrive GPU device \"{}\"", uuid)
         })
     }
 
@@ -312,34 +288,53 @@ impl GpuDevice for NvidiaDevice {
     // Set the device fan curve, this does not automatically
     // set the fan mode to curve
     fn set_fan_curve(&mut self, fan_curve: Box<dyn FanCurve + Send>) {
-        self.fan_curve = fan_curve;
+        self.fan_curve = Some(fan_curve);
     }
     // Set the device fan mode, if no fan curve was previously set
     // default to a 100% fan speed curve
     fn set_fan_mode(&mut self, fan_mode: FanMode) -> Result<()> {
         match fan_mode {
-            FanMode::Auto => self
-                .get_device()?
-                .set_fan_control_policy(
-                    0,
-                    FanControlPolicy::TemperatureContinousSw,
-                )
-                .map_err(|e| DeviceError::DeviceFanError {
-                    reason: format!(
-                        "Failed to set fan mode to automatic for: \"{}\"",
-                        self.uuid
-                    ),
-                    error: e.into(),
-                })?,
-            _ => {
+            FanMode::Auto => {
+                self.get_device()?
+                    .set_fan_control_policy(
+                        0,
+                        FanControlPolicy::TemperatureContinousSw,
+                    )
+                    .with_context(|| {
+                        format!(
+                            "Failed to set fan mode to auto: \"{}\"",
+                            self.uuid
+                        )
+                    })?;
+            }
+
+            FanMode::Curve => {
+                if self.fan_curve.is_none() {
+                    return Err(anyhow!(
+                        "Attempting to set curve fan mode with no curve!"
+                    ));
+                }
+
                 self.get_device()?
                     .set_fan_control_policy(0, FanControlPolicy::Manual)
-                    .map_err(|e| DeviceError::DeviceFanError {
-                        reason: format!(
-                            "Failed to set fan mode to manual for: \"{}\"",
+                    .with_context(|| {
+                        format!(
+                            "Failed to set fan mode to curve: \"{}\"",
                             self.uuid
-                        ),
-                        error: e.into(),
+                        )
+                    })?;
+
+                self.update_fan()?;
+            }
+
+            FanMode::Manual(_) => {
+                self.get_device()?
+                    .set_fan_control_policy(0, FanControlPolicy::Manual)
+                    .with_context(|| {
+                        format!(
+                            "Failed to set fan mode to manual: \"{}\"",
+                            self.uuid
+                        )
                     })?;
 
                 self.update_fan()?;
@@ -353,49 +348,48 @@ impl GpuDevice for NvidiaDevice {
     // Update the fan speed according to the mode and the fan curve
     fn update_fan(&mut self) -> Result<()> {
         // Get the NVML device
-        let mut device = self.get_device().map_err(|e| match e {
-            DeviceError::DeviceInternal { reason: _, error } => {
-                DeviceError::DeviceFanError {
-                    reason: format!("Device query error during fan update"),
-                    error,
-                }
-            }
-            _ => e,
-        })?;
+        let mut device = self
+            .get_device()
+            .with_context(|| "Device query error during fan update")?;
 
         match self.fan_mode {
             FanMode::Curve => {
+                // Should be impossible for the fan curve to not
+                // be set by this point
+                let fan_curve = self.fan_curve.as_ref().unwrap();
+
                 // If the query for the temperature fail return
                 // 110 degrees for safety
                 let temp = device
                     .temperature(TemperatureSensor::Gpu)
                     .unwrap_or_else(|_| 110) as i32;
-                let fan_speed = self.fan_curve.get_speed(temp);
+                let fan_speed = fan_curve.get_speed(temp);
 
-                debug!("Updating fan: Mode Curve - Speed: {:?}%", fan_speed);
+                debug!(
+                    "Updating fan: Mode Curve - Temp: {:?} - Speed: {:?}%",
+                    temp, fan_speed
+                );
 
-                device.set_fan_speed(0, fan_speed as u32).map_err(|e| {
-                    DeviceError::DeviceFanError {
-                        reason: format!(
+                device.set_fan_speed(0, fan_speed as u32).with_context(
+                    || {
+                        format!(
                             "Failed to set fan speed for device \"{}\"",
                             self.uuid
-                        ),
-                        error: e.into(),
-                    }
-                })?;
+                        )
+                    },
+                )?;
             }
             FanMode::Manual(speed) => {
                 debug!("Updating fan: Mode Manual - Speed: {:?}%", speed);
 
-                device.set_fan_speed(0, speed as u32).map_err(|e| {
-                    DeviceError::DeviceFanError {
-                        reason: format!(
+                device.set_fan_speed(0, speed as u32).with_context(
+                    || {
+                        format!(
                             "Failed to set fan speed for device \"{}\"",
                             self.uuid
-                        ),
-                        error: e.into(),
-                    }
-                })?;
+                        )
+                    },
+                )?;
             }
             _ => {
                 debug!("Updating fan: Mode Auto")
@@ -431,7 +425,7 @@ impl GpuDevice for NvidiaDevice {
 
     // Apply the given GPU configuration to the device
     // The configuration vendor must match the
-    fn apply_gpu_config(&mut self, gpu_config: GpuConfig) -> Result<()> {
+    fn set_device_config(&mut self, gpu_config: GpuConfig) -> Result<()> {
         // Get the NVML device
         let mut device = self.get_device()?;
 
@@ -467,14 +461,5 @@ impl GpuDevice for NvidiaDevice {
         }
 
         Ok(())
-    }
-}
-
-impl From<NvmlError> for DeviceError {
-    fn from(value: NvmlError) -> Self {
-        Self::DeviceInternal {
-            reason: format!("Device query error"),
-            error: value.into(),
-        }
     }
 }

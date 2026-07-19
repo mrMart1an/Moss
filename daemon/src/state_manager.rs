@@ -347,13 +347,13 @@ impl StateManager {
 
             // Query the configuration manager for the fan update interval
             let (tx, rx) = oneshot::channel();
-            let message = ConfigMessage::GetConfig {
+            let message = ConfigMessage::GetDeviceConfig {
                 uuid: uuid.clone(),
                 tx,
             };
 
             let answer = self.query_config_manager(message, rx).await?;
-            let config = extract_answer!(ConfigMessageAnswer::Config, answer)?;
+            let config = extract_answer!(ConfigMessageAnswer::DeviceConfig, answer)?;
 
             // Apply the fan curve settings
             self.apply_config(&uuid, config).await?;
@@ -446,7 +446,7 @@ impl StateManager {
         // Only apply config settings if the config manager
         // returned a config profile
         if let Some(config) = config_opt {
-            let message = DevicesToStateMessage::ApplyDeviceGpuConfig {
+            let message = DevicesToStateMessage::SetDeviceConfig {
                 uuid: uuid.to_string(),
                 config,
             };

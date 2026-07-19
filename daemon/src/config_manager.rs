@@ -1,3 +1,4 @@
+use anyhow::{Context, anyhow};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
@@ -5,12 +6,11 @@ use std::{
     path::{Path, PathBuf},
     time::Duration,
 };
-use thiserror::Error;
 
 use tokio::{
     select,
     sync::{
-        mpsc::{Receiver, Sender},
+        mpsc::Receiver,
         oneshot,
     },
 };
@@ -19,7 +19,6 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, trace};
 
 use crate::{
-    errors::MossdError,
     fan_curve::{fan_curve_info::FanCurveInfo, fan_mode::FanMode},
     gpu_device::{
         DEFAULT_DATA_UPDATE_INTERVAL, DEFAULT_FAN_UPDATE_INTERVAL,
@@ -28,24 +27,7 @@ use crate::{
 };
 
 // Alias the result type for this module
-type Result<T> = std::result::Result<T, ConfigError>;
-
-// Configuration errors enum
-#[derive(Debug, Error)]
-pub enum ConfigError {
-    #[error("Configuration IO error: ({file}) {reason} - {error}")]
-    IO {
-        file: PathBuf,
-        reason: String,
-        error: anyhow::Error,
-    },
-    #[error("Configuration set error: {reason}")]
-    Set { reason: String },
-    #[error("Configuration get error: {reason}")]
-    Get { reason: String },
-    #[error("Configuration TX error: {reason}")]
-    TxError { reason: String },
-}
+type Result<T> = std::result::Result<T, anyhow::Error>;
 
 // Store the answer to the configuration request
 #[derive(Debug)]
@@ -54,7 +36,7 @@ pub enum ConfigMessageAnswer {
     FanCurve(Option<FanCurveInfo>),
     FanUpdateInterval(Option<Duration>),
     DataUpdateInterval(Option<Duration>),
-    Config(Option<GpuConfig>),
+    DeviceConfig(Option<GpuConfig>),
 }
 
 type Responder = oneshot::Sender<ConfigMessageAnswer>;
@@ -76,7 +58,7 @@ pub enum ConfigMessage {
     },
     // Get the config for the given device
     // Return None if the device doesn't exist in the configuration
-    GetConfig {
+    GetDeviceConfig {
         uuid: String,
         tx: Responder,
     },
@@ -182,16 +164,13 @@ impl ConfigManager {
         &mut self,
         run_token: CancellationToken,
         mut rx_message: Receiver<ConfigMessage>,
-        tx_err: Sender<MossdError>,
     ) {
         info!("Config manager: Running");
 
         // Parse the config file specified at creation time
-        if let Err(err) = self.parse_config_file() {
-            tx_err.send(err.into()).await.unwrap_or_else(|err| {
-                error!("Failed to send error over channel: {err}");
-            });
-        }
+        self.parse_config_file().unwrap_or_else(|e| {
+            error!("Initialization config parsing failed! {}", e)
+        });
 
         trace!("Current device profiles: {:?}", self.config.device_profiles);
         trace!("Current profile configs: {:?}", self.config.profile_configs);
@@ -209,11 +188,9 @@ impl ConfigManager {
                 },
                 message = rx_message.recv() => {
                     if let Some(message) = message {
-                        if let Err(err) = self.parse_message(message) {
-                            tx_err.send(err.into()).await.unwrap_or_else(|err| {
-                                error!("Failed to send error over channel: {err}");
-                            });
-                        }
+                        self.parse_message(message).unwrap_or_else(|e| {
+                            error!("Failed to send error over channel: {}", e);
+                        });
                     }
                 }
             }
@@ -361,23 +338,23 @@ impl ConfigManager {
 
                 (tx, ConfigMessageAnswer::DataUpdateInterval(updata_interval))
             }
-            ConfigMessage::GetConfig { uuid, tx } => {
+            ConfigMessage::GetDeviceConfig { uuid, tx } => {
                 let profile = self.get_profile(&uuid)?;
 
                 let device_config = profile.device_config;
 
-                (tx, ConfigMessageAnswer::Config(device_config))
+                (tx, ConfigMessageAnswer::DeviceConfig(device_config))
             }
 
             _ => {
-                return Err(ConfigError::Get {
-                    reason: format!("Trying to parse unknown message"),
-                });
+                return Err(anyhow!(format!(
+                    "Trying to parse unknown message"
+                )));
             }
         };
 
-        tx.send(answer).map_err(|_| ConfigError::TxError {
-            reason: format!("Failed to send answer on one shot channel"),
+        tx.send(answer).map_err(|_| {
+            anyhow!("Failed to send answer on one shot channel")
         })?;
 
         Ok(())
@@ -405,12 +382,11 @@ impl ConfigManager {
         debug!("Parsing config file at: {:?}", self.config_path);
 
         self.config =
-            confy::load_path(self.config_path.clone()).map_err(|e| {
-                ConfigError::IO {
-                    file: self.config_path.clone(),
-                    reason: format!("Config parsing error"),
-                    error: e.into(),
-                }
+            confy::load_path(self.config_path.clone()).with_context(|| {
+                format!(
+                    "config parsing error!: File: \"{:?}\"",
+                    self.config_path.to_str()
+                )
             })?;
 
         Ok(())
@@ -421,10 +397,11 @@ impl ConfigManager {
         debug!("Saving config file at: {:?}", self.config_path);
 
         confy::store_path(self.config_path.clone(), self.config.clone())
-            .map_err(|e| ConfigError::IO {
-                file: self.config_path.clone(),
-                reason: format!("Config saving error"),
-                error: e.into(),
+            .with_context(|| {
+                format!(
+                    "Config save error!: File: File: \"{:?}\"",
+                    self.config_path.to_str()
+                )
             })?;
 
         Ok(())

@@ -20,6 +20,26 @@ impl LinearCurve {
 
         curve
     }
+
+    // Perform the linear interpolation between 
+    // two points and return the fan speed
+    fn linear_interpolation(
+        pre: (&i32, &u8),
+        suc: (&i32, &u8),
+        temp: i32,
+    ) -> u8 {
+        let p: f32 = temp as f32;
+
+        let x1: f32 = *pre.0 as f32;
+        let y1: f32 = *pre.1 as f32;
+        let x2: f32 = *suc.0 as f32;
+        let y2: f32 = *suc.1 as f32;
+
+        let m: f32 = (y1 - y2) / (x1 - x2);
+        let b: f32 = (x1 * y2 - x2 * y1) / (x1 - x2);
+
+        (m * p + b) as u8
+    }
 }
 
 impl FanCurve for LinearCurve {
@@ -39,7 +59,7 @@ impl FanCurve for LinearCurve {
 
         if let Some(pre) = preceding {
             if let Some(suc) = succeeding {
-                return linear_interpolation(pre, suc, temp);
+                return Self::linear_interpolation(pre, suc, temp);
 
                 // If only one element was in the map return it
             } else {
@@ -73,22 +93,4 @@ impl FanCurve for LinearCurve {
     }
 }
 
-// Perform the linear interpolation between 
-// two points and return the fan speed
-fn linear_interpolation(
-    pre: (&i32, &u8),
-    suc: (&i32, &u8),
-    temp: i32,
-) -> u8 {
-    let p: f32 = temp as f32;
 
-    let x1: f32 = *pre.0 as f32;
-    let y1: f32 = *pre.1 as f32;
-    let x2: f32 = *suc.0 as f32;
-    let y2: f32 = *suc.1 as f32;
-
-    let m: f32 = (y1 - y2) / (x1 - x2);
-    let b: f32 = (x1 * y2 - x2 * y1) / (x1 - x2);
-
-    (m * p + b) as u8
-}

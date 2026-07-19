@@ -4,8 +4,8 @@ use std::{
     time::{Duration, Instant},
 };
 
+use anyhow::{Context, anyhow};
 use nvml_wrapper::Nvml;
-use thiserror::Error;
 use tokio::{
     select,
     sync::{
@@ -17,11 +17,13 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, trace, warn};
 
 use crate::{
-    errors::MossdError,
-    fan_curve::{FanCurve, fan_mode::FanMode},
+    config_manager::{ConfigMessage, ConfigMessageAnswer},
+    fan_curve::{
+        FanCurve, fan_curve_info::FanCurveInfo, fan_mode::FanMode,
+        hysteresis_curve::HysteresisCurve, linear_curve::LinearCurve,
+    },
     gpu_device::{
-        DEFAULT_DATA_UPDATE_INTERVAL, DEFAULT_FAN_UPDATE_INTERVAL, DeviceError,
-        GpuDevice,
+        DEFAULT_DATA_UPDATE_INTERVAL, DEFAULT_FAN_UPDATE_INTERVAL, GpuDevice,
         gpu_config::GpuConfig,
         gpu_data::{
             GpuData, GpuDataUpdates, GpuVendorData, GpuVendorDataUpdates,
@@ -34,22 +36,7 @@ use crate::{
 type Responder = oneshot::Sender<DevicesToStateAnswer>;
 
 // Alias the result type for this module
-type Result<T> = std::result::Result<T, DevicesManagerError>;
-
-#[derive(Debug, Error)]
-pub enum DevicesManagerError {
-    #[error(transparent)]
-    Device(#[from] DeviceError),
-    #[error("Device manager discovery error: {reason}")]
-    Discovery {
-        reason: String,
-        error: anyhow::Error,
-    },
-    #[error("Device manager channel TX error: {reason}")]
-    TX { reason: String },
-    #[error("Device manager channel invalid device error: {reason}")]
-    InvalidDevice { reason: String },
-}
+type Result<T> = std::result::Result<T, anyhow::Error>;
 
 #[derive(Debug)]
 pub enum DevicesToStateMessage {
@@ -93,7 +80,7 @@ pub enum DevicesToStateMessage {
     // Set the device fan curve
     SetDeviceFanCurve {
         uuid: String,
-        fan_curve: Box<dyn FanCurve + Send>,
+        fan_curve: FanCurveInfo,
     },
     // Set the fan update interval for the device
     SetDeviceFanUpdateInterval {
@@ -102,10 +89,19 @@ pub enum DevicesToStateMessage {
     },
 
     // Apply the given GPU configuration to the device
-    ApplyDeviceGpuConfig {
+    SetDeviceConfig {
         uuid: String,
         config: GpuConfig,
     },
+
+    // Query the config manager for configuration and apply it to
+    // the given device
+    ApplyConfigToDevice {
+        uuid: String,
+    },
+    // Query the config manager for configuration and apply it to
+    // all devices managed
+    ApplyConfigToAllDevices,
 }
 
 #[derive(Debug)]
@@ -171,7 +167,7 @@ impl DevicesManager {
             // Update the fan speed for the first time
             if let Err(e) = device.update_fan() {
                 warn!(
-                    "Error while updating fan speed on device creation: {}",
+                    "Error while updating fan speed on device manager creation: {}",
                     e
                 )
             }
@@ -242,8 +238,17 @@ impl DevicesManager {
         &mut self,
         run_token: CancellationToken,
         mut rx_message: Receiver<DevicesToStateMessage>,
-        tx_err: Sender<MossdError>,
+
+        tx_config: Sender<ConfigMessage>,
     ) {
+        // Apply the configuration on manager startup
+        self.apply_config_all_device(&tx_config)
+            .await
+            .unwrap_or_else(|e| {
+                error!("Failed to apply config on device manager startup: {e}")
+            });
+
+        // Schedule the first fan and data update
         let (mut next_fan_update_device, mut next_fan_update_time) =
             self.schedule_fan_update();
         let (mut next_data_update_device, mut next_data_update_time) =
@@ -263,38 +268,21 @@ impl DevicesManager {
                 message = rx_message.recv() => {
                     trace!("Handling message: {:?}", message);
 
-                    if let Err(err) = self.parse_message(message) {
-                        error!("Error during message handling: {}", err);
-
-                        tx_err.send(err.into()).await.unwrap_or_else(|err| {
-                            error!("Failed to send error over channel: {err}");
-                        });
-                    }
+                    self.parse_message(message, &tx_config).await.
+                        unwrap_or_else(|e| error!("{e}"));
                 },
                 // Update the fan and schedule the next update
                 _ = tokio::time::sleep(next_fan_update_time) => {
-                    if let Err(err) = self.update_fans(&next_fan_update_device)
-                    {
-                        error!("Error during fan update: {}", err);
-
-                        tx_err.send(err.into()).await.unwrap_or_else(|err| {
-                            error!("Failed to send error over channel: {err}");
-                        });
-                    }
+                    self.update_fans(&next_fan_update_device)
+                        .unwrap_or_else(|e| error!("{e}"));
 
                     (next_fan_update_device, next_fan_update_time) =
                         self.schedule_fan_update();
                 }
                 // Update the data and schedule the next update
                 _ = tokio::time::sleep(next_data_update_time) => {
-                    if let Err(err) = self.update_data(&next_data_update_device)
-                    {
-                        error!("Error during data update: {}", err);
-
-                        tx_err.send(err.into()).await.unwrap_or_else(|err| {
-                            error!("Failed to send error over channel: {err}");
-                        });
-                    }
+                    self.update_data(&next_data_update_device)
+                        .unwrap_or_else(|e| error!("{e}"));
 
                     (next_data_update_device, next_data_update_time) =
                         self.schedule_data_update();
@@ -303,35 +291,130 @@ impl DevicesManager {
         }
     }
 
+    // Apply the config manager configuration to all manged devices
+    async fn apply_config_all_device(
+        &mut self,
+        tx_config: &Sender<ConfigMessage>,
+    ) -> Result<()> {
+        for (uuid, device) in self.devices.iter_mut() {
+            Self::apply_config(uuid, device, tx_config).await?;
+        }
+
+        Ok(())
+    }
+
+    // Apply the config manager configuration for the given device
+    async fn apply_config(
+        uuid: &str,
+        device: &mut Box<dyn GpuDevice + Send>,
+        tx_config: &Sender<ConfigMessage>,
+    ) -> Result<()> {
+        // Get the fan mode
+        let (tx, rx) = oneshot::channel();
+        let msg = ConfigMessage::GetFanMode {
+            uuid: uuid.to_string(),
+            tx,
+        };
+
+        tx_config
+            .send(msg)
+            .await
+            .with_context(|| "Failed config manager send on fan mode query")?;
+
+        let fan_mode_answer = rx.await.with_context(
+            || "Failed config manager recive on fan mode query",
+        )?;
+
+        let fan_mode =
+            if let ConfigMessageAnswer::FanMode(mode) = fan_mode_answer {
+                mode
+            } else {
+                return Err(anyhow!("Wrong answer from config manager!"));
+            };
+
+        // Get the fan curve
+        let (tx, rx) = oneshot::channel();
+        let msg = ConfigMessage::GetFanCurve {
+            uuid: uuid.to_string(),
+            tx,
+        };
+
+        tx_config
+            .send(msg)
+            .await
+            .with_context(|| "Failed config manager send on fan curve query")?;
+
+        let fan_curve_answer = rx.await.with_context(
+            || "Failed config manager recive on fan curve query",
+        )?;
+
+        let fan_curve =
+            if let ConfigMessageAnswer::FanCurve(curve) = fan_curve_answer {
+                curve
+            } else {
+                return Err(anyhow!("Wrong answer from config manager!"));
+            };
+
+        // Get the fan mode
+        let (tx, rx) = oneshot::channel();
+        let msg = ConfigMessage::GetDeviceConfig {
+            uuid: uuid.to_string(),
+            tx,
+        };
+
+        tx_config.send(msg).await.with_context(
+            || "Failed config manager send on device config query",
+        )?;
+
+        let device_config_answer = rx.await.with_context(
+            || "Failed config manager recive on device config query",
+        )?;
+
+        let device_config = if let ConfigMessageAnswer::DeviceConfig(config) =
+            device_config_answer
+        {
+            config
+        } else {
+            return Err(anyhow!("Wrong answer from config manager!"));
+        };
+
+        // Apply the configuration to the device
+        // NOTE: the fan curve must be applied before the fan mode
+
+        // Apply fan curve
+        if let Some(info) = fan_curve {
+            let curve_box = Self::get_fan_curve_from_info(info);
+            device.set_fan_curve(curve_box);
+        }
+        device.set_fan_mode(fan_mode)?;
+
+        // Apply the device config
+        if let Some(config) = device_config {
+            device.set_device_config(config)?;
+        }
+
+        Ok(())
+    }
+
     // Discover Nvidia GPUs on the system, create the associated
     // GPU devices and add them to the given hash map
     fn discover_nvidia_gpus(
         nvml: Arc<Nvml>,
         devices_map: &mut HashMap<String, Box<dyn GpuDevice + Send>>,
     ) -> Result<()> {
-        let device_count = nvml.device_count().map_err(|e| {
-            DevicesManagerError::Discovery {
-                reason: format!("Failed to enumerate Nvidia devices"),
-                error: e.into(),
-            }
-        })?;
+        let device_count = nvml
+            .device_count()
+            .with_context(|| "Failed to enumerate Nvidia devices")?;
 
         for i in 0..device_count {
             // Get the UUID of each device
-            let device = nvml.device_by_index(i).map_err(|e| {
-                DevicesManagerError::Discovery {
-                    reason: format!("Failed to get Nvidia device"),
-                    error: e.into(),
-                }
+            let device = nvml
+                .device_by_index(i)
+                .with_context(|| "Failed to get Nvidia device")?;
+
+            let uuid = device.uuid().with_context(|| {
+                format!("Failed to get Nvidia device uuid (index: {})", i)
             })?;
-            let uuid =
-                device.uuid().map_err(|e| DevicesManagerError::Discovery {
-                    reason: format!(
-                        "Failed to get Nvidia device uuid (index: {})",
-                        i
-                    ),
-                    error: e.into(),
-                })?;
 
             debug!("Found Nvidia device: \"{}\"", uuid);
 
@@ -346,9 +429,11 @@ impl DevicesManager {
     }
 
     // Parse and eventually answer to incoming messages
-    fn parse_message(
+    async fn parse_message(
         &mut self,
         message: Option<DevicesToStateMessage>,
+
+        tx_config: &Sender<ConfigMessage>,
     ) -> Result<()> {
         if message.is_none() {
             return Ok(());
@@ -363,45 +448,41 @@ impl DevicesManager {
                 }
 
                 let answer = DevicesToStateAnswer::DeviceList(devices_list);
-                tx.send(answer).map_err(|v| DevicesManagerError::TX {
-                    reason: format!(
+                tx.send(answer).map_err(|v| {
+                    anyhow!(format!(
                         "Failed to send answer over channel: ({:?})",
                         v
-                    ),
-                })?
+                    ))
+                })?;
             }
 
             DevicesToStateMessage::GetDeviceInfo { uuid, tx } => {
                 let device = self.devices.get(&uuid).ok_or_else(|| {
-                    DevicesManagerError::InvalidDevice {
-                        reason: format!("Trying to access non-existing device"),
-                    }
+                    anyhow!("Trying to access non-existing device")
                 })?;
 
                 let answer =
                     DevicesToStateAnswer::DeviceInfo(device.get_info());
-                tx.send(answer).map_err(|v| DevicesManagerError::TX {
-                    reason: format!(
+                tx.send(answer).map_err(|v| {
+                    anyhow!(format!(
                         "Failed to send answer over channel: ({:?})",
                         v
-                    ),
+                    ))
                 })?
             }
             DevicesToStateMessage::GetDeviceVendorInfo { uuid, tx } => {
                 let device = self.devices.get(&uuid).ok_or_else(|| {
-                    DevicesManagerError::InvalidDevice {
-                        reason: format!("Trying to access non-existing device"),
-                    }
+                    anyhow!(format!("Trying to access non-existing device"))
                 })?;
 
                 let answer = DevicesToStateAnswer::DeviceVendorInfo(
                     device.get_vendor_info(),
                 );
-                tx.send(answer).map_err(|v| DevicesManagerError::TX {
-                    reason: format!(
+                tx.send(answer).map_err(|v| {
+                    anyhow!(format!(
                         "Failed to send answer over channel: ({:?})",
                         v
-                    ),
+                    ))
                 })?
             }
 
@@ -410,11 +491,11 @@ impl DevicesManager {
                 let data = self.last_data.get(&uuid);
                 let answer = DevicesToStateAnswer::DeviceData(data.cloned());
 
-                tx.send(answer).map_err(|v| DevicesManagerError::TX {
-                    reason: format!(
+                tx.send(answer).map_err(|v| {
+                    anyhow!(format!(
                         "Failed to send answer over channel: ({:?})",
                         v
-                    ),
+                    ))
                 })?
             }
             DevicesToStateMessage::GetDeviceVendorData { uuid, tx } => {
@@ -424,11 +505,11 @@ impl DevicesManager {
                     vendor_data.cloned(),
                 );
 
-                tx.send(answer).map_err(|v| DevicesManagerError::TX {
-                    reason: format!(
+                tx.send(answer).map_err(|v| {
+                    anyhow!(format!(
                         "Failed to send answer over channel: ({:?})",
                         v
-                    ),
+                    ))
                 })?
             }
             DevicesToStateMessage::SetDeviceDataUpdateInterval {
@@ -448,21 +529,20 @@ impl DevicesManager {
 
             DevicesToStateMessage::SetDeviceFanMode { uuid, fan_mode } => {
                 let device = self.devices.get_mut(&uuid).ok_or_else(|| {
-                    DevicesManagerError::InvalidDevice {
-                        reason: format!("Trying to access non-existing device"),
-                    }
+                    anyhow!("Trying to access non-existing device")
                 })?;
 
                 device.set_fan_mode(fan_mode)?;
             }
             DevicesToStateMessage::SetDeviceFanCurve { uuid, fan_curve } => {
                 let device = self.devices.get_mut(&uuid).ok_or_else(|| {
-                    DevicesManagerError::InvalidDevice {
-                        reason: format!("Trying to access non-existing device"),
-                    }
+                    anyhow!("Trying to access non-existing device")
                 })?;
 
-                device.set_fan_curve(fan_curve);
+                // Generate the fan curve
+                let curve_box = Self::get_fan_curve_from_info(fan_curve);
+
+                device.set_fan_curve(curve_box);
             }
             DevicesToStateMessage::SetDeviceFanUpdateInterval {
                 uuid,
@@ -471,14 +551,23 @@ impl DevicesManager {
                 self.fan_update_intervals.insert(uuid, interval);
             }
 
-            DevicesToStateMessage::ApplyDeviceGpuConfig { uuid, config } => {
+            DevicesToStateMessage::SetDeviceConfig { uuid, config } => {
                 let device = self.devices.get_mut(&uuid).ok_or_else(|| {
-                    DevicesManagerError::InvalidDevice {
-                        reason: format!("Trying to access non-existing device"),
-                    }
+                    anyhow!("Trying to access non-existing device")
                 })?;
 
-                device.apply_gpu_config(config)?;
+                device.set_device_config(config)?;
+            }
+
+            DevicesToStateMessage::ApplyConfigToDevice { uuid } => {
+                let device = self.devices.get_mut(&uuid).ok_or_else(|| {
+                    anyhow!("Trying to access non-existing device")
+                })?;
+
+                Self::apply_config(&uuid, device, tx_config).await?;
+            }
+            DevicesToStateMessage::ApplyConfigToAllDevices => {
+                self.apply_config_all_device(tx_config).await?;
             }
         }
 
@@ -552,12 +641,10 @@ impl DevicesManager {
 
             Ok(())
         } else {
-            Err(DevicesManagerError::InvalidDevice {
-                reason: format!(
-                    "Trying to update fan on non-existing device: {}",
-                    uuid
-                ),
-            })
+            Err(anyhow!(format!(
+                "Trying to update fan on non-existing device: {}",
+                uuid
+            )))
         }
     }
 
@@ -577,12 +664,10 @@ impl DevicesManager {
 
             Ok(())
         } else {
-            Err(DevicesManagerError::InvalidDevice {
-                reason: format!(
-                    "Trying to update fan on non-existing device: {}",
-                    uuid
-                ),
-            })
+            Err(anyhow!(format!(
+                "Trying to update fan on non-existing device: {}",
+                uuid
+            )))
         }
     }
 
@@ -590,9 +675,14 @@ impl DevicesManager {
     fn quit_manager(&mut self) -> Result<()> {
         for (_, device) in self.devices.iter_mut() {
             device.set_fan_mode(FanMode::Auto)?;
-            device.apply_gpu_config(GpuConfig::default())?;
+            device.set_device_config(GpuConfig::default())?;
         }
 
         Ok(())
+    }
+
+    // Generate a linear fan curve with the given info
+    fn get_fan_curve_from_info(info: FanCurveInfo) -> Box<dyn FanCurve + Send> {
+        Box::new(HysteresisCurve::<LinearCurve>::from_info(&info))
     }
 }
