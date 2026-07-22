@@ -1,7 +1,7 @@
 // GPU data is information that is update in real time
 
 // Store the vendor specific GPU data
-#[derive(Default, Debug, Clone)]
+#[derive(Default, Debug, Clone, Copy)]
 pub enum GpuVendorData {
     #[default]
     None,
@@ -22,7 +22,7 @@ pub enum GpuVendorData {
 }
 
 // Store the vendor specific GPU data updates since last query
-#[derive(Default, Debug, Clone)]
+#[derive(Default, Debug, Clone, Copy)]
 pub enum GpuVendorDataUpdates {
     #[default]
     None,
@@ -43,7 +43,7 @@ pub enum GpuVendorDataUpdates {
 }
 
 // Store the general GPU data
-#[derive(Default, Debug, Clone)]
+#[derive(Default, Debug, Clone, Copy)]
 pub struct GpuData {
     pub temp_gpu: u32,
 
@@ -74,7 +74,7 @@ pub struct GpuData {
 }
 
 // Report the update status of each variable since the last query
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default, Clone, Copy)]
 pub struct GpuDataUpdates {
     pub temp_gpu: bool,
 

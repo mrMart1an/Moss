@@ -15,7 +15,7 @@ use tracing::error;
 use crate::{
     config_manager::{ConfigMessage, ConfigMessageAnswer},
     dbus_service::DBusServiceMessage,
-    devices_manager::{DevicesToStateAnswer, DevicesToStateMessage},
+    devices_manager::{DevicesManagerAnswer, DevicesManagerMessage},
     errors::MossdError,
     fan_curve::{
         fan_curve_info::FanCurveInfo, fan_mode::FanMode,
@@ -87,7 +87,7 @@ pub enum DbusToManagerAnswer {
 
 pub struct StateManager {
     tx_config_manager: Sender<ConfigMessage>,
-    tx_devices_manager: Sender<DevicesToStateMessage>,
+    tx_devices_manager: Sender<DevicesManagerMessage>,
 
     // D-Bus service channels
     rx_dbus_to_manager: Receiver<DbusToManagerMessage>,
@@ -97,7 +97,7 @@ pub struct StateManager {
 impl StateManager {
     pub fn new(
         tx_config_manager: Sender<ConfigMessage>,
-        tx_devices_manager: Sender<DevicesToStateMessage>,
+        tx_devices_manager: Sender<DevicesManagerMessage>,
 
         rx_dbus_to_manager: Receiver<DbusToManagerMessage>,
         tx_manager_to_dbus: Sender<DBusServiceMessage>,
@@ -141,9 +141,9 @@ impl StateManager {
     // Send a query to the device manager
     async fn query_device_manager(
         &mut self,
-        message: DevicesToStateMessage,
-        rx: oneshot::Receiver<DevicesToStateAnswer>,
-    ) -> Result<DevicesToStateAnswer> {
+        message: DevicesManagerMessage,
+        rx: oneshot::Receiver<DevicesManagerAnswer>,
+    ) -> Result<DevicesManagerAnswer> {
         self.tx_devices_manager.send(message).await.map_err(|_| {
             StateManagerError::TX {
                 reason: format!("Failed to send request to devices manager"),
@@ -187,11 +187,11 @@ impl StateManager {
                 DbusToManagerMessage::GetGpus { tx: tx_answer } => {
                     // Request the device list to the device manager
                     let (tx, rx) = oneshot::channel();
-                    let message = DevicesToStateMessage::ListDevices { tx };
+                    let message = DevicesManagerMessage::ListDevices { tx };
                     let answer = self.query_device_manager(message, rx).await?;
 
                     let uuids = extract_answer!(
-                        DevicesToStateAnswer::DeviceList,
+                        DevicesManagerAnswer::DeviceList,
                         answer
                     )?;
 
@@ -203,11 +203,11 @@ impl StateManager {
                 } => {
                     let (tx, rx) = oneshot::channel();
                     let message =
-                        DevicesToStateMessage::GetDeviceInfo { uuid, tx };
+                        DevicesManagerMessage::GetDeviceInfo { uuid, tx };
                     let answer = self.query_device_manager(message, rx).await?;
 
                     let device_info = extract_answer!(
-                        DevicesToStateAnswer::DeviceInfo,
+                        DevicesManagerAnswer::DeviceInfo,
                         answer
                     )?;
 
@@ -219,11 +219,11 @@ impl StateManager {
                 } => {
                     let (tx, rx) = oneshot::channel();
                     let message =
-                        DevicesToStateMessage::GetDeviceVendorInfo { uuid, tx };
+                        DevicesManagerMessage::GetDeviceVendorInfo { uuid, tx };
                     let answer = self.query_device_manager(message, rx).await?;
 
                     let device_vendor_info = extract_answer!(
-                        DevicesToStateAnswer::DeviceVendorInfo,
+                        DevicesManagerAnswer::DeviceVendorInfo,
                         answer
                     )?;
 
@@ -238,11 +238,11 @@ impl StateManager {
                 } => {
                     let (tx, rx) = oneshot::channel();
                     let message =
-                        DevicesToStateMessage::GetDeviceData { uuid, tx };
+                        DevicesManagerMessage::GetDeviceData { uuid, tx };
                     let answer = self.query_device_manager(message, rx).await?;
 
                     let device_data = extract_answer!(
-                        DevicesToStateAnswer::DeviceData,
+                        DevicesManagerAnswer::DeviceData,
                         answer
                     )?;
 
@@ -257,11 +257,11 @@ impl StateManager {
                 } => {
                     let (tx, rx) = oneshot::channel();
                     let message =
-                        DevicesToStateMessage::GetDeviceVendorData { uuid, tx };
+                        DevicesManagerMessage::GetDeviceVendorData { uuid, tx };
                     let answer = self.query_device_manager(message, rx).await?;
 
                     let device_vendor_data = extract_answer!(
-                        DevicesToStateAnswer::DeviceVendorData,
+                        DevicesManagerAnswer::DeviceVendorData,
                         answer
                     )?;
 
@@ -291,12 +291,12 @@ impl StateManager {
 
         let answer = self
             .query_device_manager(
-                DevicesToStateMessage::ListDevices { tx: answer_tx },
+                DevicesManagerMessage::ListDevices { tx: answer_tx },
                 answer_rx,
             )
             .await?;
 
-        let uuids = extract_answer!(DevicesToStateAnswer::DeviceList, answer)?;
+        let uuids = extract_answer!(DevicesManagerAnswer::DeviceList, answer)?;
 
         // Request and apply the configuration information for every GPUs
         for uuid in uuids {
@@ -367,7 +367,7 @@ impl StateManager {
         uuid: &str,
         fan_mode: FanMode,
     ) -> Result<()> {
-        let message = DevicesToStateMessage::SetDeviceFanMode {
+        let message = DevicesManagerMessage::SetDeviceFanMode {
             uuid: uuid.to_string(),
             fan_mode,
         };
@@ -396,7 +396,7 @@ impl StateManager {
                 HysteresisCurve::<LinearCurve>::from_info(&fan_curve_info),
             );
 
-            let message = DevicesToStateMessage::SetDeviceFanCurve {
+            let message = DevicesManagerMessage::SetDeviceFanCurve {
                 uuid: uuid.to_string(),
                 fan_curve,
             };
@@ -421,7 +421,7 @@ impl StateManager {
         // Only apply fan update interval settings if the config manager
         // returned a duration value
         if let Some(interval) = update_interval_opt {
-            let message = DevicesToStateMessage::SetDeviceFanUpdateInterval {
+            let message = DevicesManagerMessage::SetDeviceFanUpdateInterval {
                 uuid: uuid.to_string(),
                 interval,
             };
@@ -446,7 +446,7 @@ impl StateManager {
         // Only apply config settings if the config manager
         // returned a config profile
         if let Some(config) = config_opt {
-            let message = DevicesToStateMessage::SetDeviceConfig {
+            let message = DevicesManagerMessage::SetDeviceConfig {
                 uuid: uuid.to_string(),
                 config,
             };

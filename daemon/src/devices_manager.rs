@@ -9,6 +9,7 @@ use nvml_wrapper::Nvml;
 use tokio::{
     select,
     sync::{
+        broadcast,
         mpsc::{Receiver, Sender},
         oneshot,
     },
@@ -33,13 +34,13 @@ use crate::{
     },
 };
 
-type Responder = oneshot::Sender<DevicesToStateAnswer>;
+type Responder = oneshot::Sender<DevicesManagerAnswer>;
 
 // Alias the result type for this module
 type Result<T> = std::result::Result<T, anyhow::Error>;
 
 #[derive(Debug)]
-pub enum DevicesToStateMessage {
+pub enum DevicesManagerMessage {
     // List all the devices managed by the devices manager
     ListDevices {
         tx: Responder,
@@ -105,7 +106,7 @@ pub enum DevicesToStateMessage {
 }
 
 #[derive(Debug)]
-pub enum DevicesToStateAnswer {
+pub enum DevicesManagerAnswer {
     DeviceList(Vec<String>),
 
     DeviceInfo(GpuInfo),
@@ -113,6 +114,22 @@ pub enum DevicesToStateAnswer {
 
     DeviceData(Option<(GpuData, GpuDataUpdates)>),
     DeviceVendorData(Option<(GpuVendorData, GpuVendorDataUpdates)>),
+}
+
+pub enum DeviceManagerNotification {
+    // Notify of a device fan update, return the UUID of the updated device
+    FanUpdated(String),
+
+    // Notify of a device data update
+    DataUpdated {
+        uuid: String,
+
+        data: GpuData,
+        vendor_data: GpuVendorData,
+
+        data_updates: GpuDataUpdates,
+        vendor_data_updates: GpuVendorDataUpdates,
+    },
 }
 
 pub struct DevicesManager {
@@ -237,7 +254,9 @@ impl DevicesManager {
     pub async fn run(
         &mut self,
         run_token: CancellationToken,
-        mut rx_message: Receiver<DevicesToStateMessage>,
+
+        mut rx_message: Receiver<DevicesManagerMessage>,
+        tx_notificatioon: broadcast::Sender<DeviceManagerNotification>,
 
         tx_config: Sender<ConfigMessage>,
     ) {
@@ -273,7 +292,7 @@ impl DevicesManager {
                 },
                 // Update the fan and schedule the next update
                 _ = tokio::time::sleep(next_fan_update_time) => {
-                    self.update_fans(&next_fan_update_device)
+                    self.update_fans(&next_fan_update_device, &tx_notificatioon)
                         .unwrap_or_else(|e| error!("{e}"));
 
                     (next_fan_update_device, next_fan_update_time) =
@@ -281,7 +300,7 @@ impl DevicesManager {
                 }
                 // Update the data and schedule the next update
                 _ = tokio::time::sleep(next_data_update_time) => {
-                    self.update_data(&next_data_update_device)
+                    self.update_data(&next_data_update_device, &tx_notificatioon)
                         .unwrap_or_else(|e| error!("{e}"));
 
                     (next_data_update_device, next_data_update_time) =
@@ -431,7 +450,7 @@ impl DevicesManager {
     // Parse and eventually answer to incoming messages
     async fn parse_message(
         &mut self,
-        message: Option<DevicesToStateMessage>,
+        message: Option<DevicesManagerMessage>,
 
         tx_config: &Sender<ConfigMessage>,
     ) -> Result<()> {
@@ -440,14 +459,14 @@ impl DevicesManager {
         }
 
         match message.unwrap() {
-            DevicesToStateMessage::ListDevices { tx } => {
+            DevicesManagerMessage::ListDevices { tx } => {
                 let mut devices_list = Vec::new();
 
                 for (uuid, _) in self.devices.iter() {
                     devices_list.push(uuid.clone());
                 }
 
-                let answer = DevicesToStateAnswer::DeviceList(devices_list);
+                let answer = DevicesManagerAnswer::DeviceList(devices_list);
                 tx.send(answer).map_err(|v| {
                     anyhow!(format!(
                         "Failed to send answer over channel: ({:?})",
@@ -456,13 +475,13 @@ impl DevicesManager {
                 })?;
             }
 
-            DevicesToStateMessage::GetDeviceInfo { uuid, tx } => {
+            DevicesManagerMessage::GetDeviceInfo { uuid, tx } => {
                 let device = self.devices.get(&uuid).ok_or_else(|| {
                     anyhow!("Trying to access non-existing device")
                 })?;
 
                 let answer =
-                    DevicesToStateAnswer::DeviceInfo(device.get_info());
+                    DevicesManagerAnswer::DeviceInfo(device.get_info());
                 tx.send(answer).map_err(|v| {
                     anyhow!(format!(
                         "Failed to send answer over channel: ({:?})",
@@ -470,12 +489,12 @@ impl DevicesManager {
                     ))
                 })?
             }
-            DevicesToStateMessage::GetDeviceVendorInfo { uuid, tx } => {
+            DevicesManagerMessage::GetDeviceVendorInfo { uuid, tx } => {
                 let device = self.devices.get(&uuid).ok_or_else(|| {
                     anyhow!(format!("Trying to access non-existing device"))
                 })?;
 
-                let answer = DevicesToStateAnswer::DeviceVendorInfo(
+                let answer = DevicesManagerAnswer::DeviceVendorInfo(
                     device.get_vendor_info(),
                 );
                 tx.send(answer).map_err(|v| {
@@ -486,10 +505,10 @@ impl DevicesManager {
                 })?
             }
 
-            DevicesToStateMessage::GetDeviceData { uuid, tx } => {
+            DevicesManagerMessage::GetDeviceData { uuid, tx } => {
                 // Generate answer
                 let data = self.last_data.get(&uuid);
-                let answer = DevicesToStateAnswer::DeviceData(data.cloned());
+                let answer = DevicesManagerAnswer::DeviceData(data.cloned());
 
                 tx.send(answer).map_err(|v| {
                     anyhow!(format!(
@@ -498,10 +517,10 @@ impl DevicesManager {
                     ))
                 })?
             }
-            DevicesToStateMessage::GetDeviceVendorData { uuid, tx } => {
+            DevicesManagerMessage::GetDeviceVendorData { uuid, tx } => {
                 // Generate answer
                 let vendor_data = self.last_vendor_data.get(&uuid);
-                let answer = DevicesToStateAnswer::DeviceVendorData(
+                let answer = DevicesManagerAnswer::DeviceVendorData(
                     vendor_data.cloned(),
                 );
 
@@ -512,7 +531,7 @@ impl DevicesManager {
                     ))
                 })?
             }
-            DevicesToStateMessage::SetDeviceDataUpdateInterval {
+            DevicesManagerMessage::SetDeviceDataUpdateInterval {
                 uuid,
                 interval,
             } => {
@@ -527,14 +546,14 @@ impl DevicesManager {
                 }
             }
 
-            DevicesToStateMessage::SetDeviceFanMode { uuid, fan_mode } => {
+            DevicesManagerMessage::SetDeviceFanMode { uuid, fan_mode } => {
                 let device = self.devices.get_mut(&uuid).ok_or_else(|| {
                     anyhow!("Trying to access non-existing device")
                 })?;
 
                 device.set_fan_mode(fan_mode)?;
             }
-            DevicesToStateMessage::SetDeviceFanCurve { uuid, fan_curve } => {
+            DevicesManagerMessage::SetDeviceFanCurve { uuid, fan_curve } => {
                 let device = self.devices.get_mut(&uuid).ok_or_else(|| {
                     anyhow!("Trying to access non-existing device")
                 })?;
@@ -544,14 +563,14 @@ impl DevicesManager {
 
                 device.set_fan_curve(curve_box);
             }
-            DevicesToStateMessage::SetDeviceFanUpdateInterval {
+            DevicesManagerMessage::SetDeviceFanUpdateInterval {
                 uuid,
                 interval,
             } => {
                 self.fan_update_intervals.insert(uuid, interval);
             }
 
-            DevicesToStateMessage::SetDeviceConfig { uuid, config } => {
+            DevicesManagerMessage::SetDeviceConfig { uuid, config } => {
                 let device = self.devices.get_mut(&uuid).ok_or_else(|| {
                     anyhow!("Trying to access non-existing device")
                 })?;
@@ -559,14 +578,14 @@ impl DevicesManager {
                 device.set_device_config(config)?;
             }
 
-            DevicesToStateMessage::ApplyConfigToDevice { uuid } => {
+            DevicesManagerMessage::ApplyConfigToDevice { uuid } => {
                 let device = self.devices.get_mut(&uuid).ok_or_else(|| {
                     anyhow!("Trying to access non-existing device")
                 })?;
 
                 Self::apply_config(&uuid, device, tx_config).await?;
             }
-            DevicesToStateMessage::ApplyConfigToAllDevices => {
+            DevicesManagerMessage::ApplyConfigToAllDevices => {
                 self.apply_config_all_device(tx_config).await?;
             }
         }
@@ -631,13 +650,24 @@ impl DevicesManager {
 
     // Update the fans on the given device and update the last
     // fan update time
-    fn update_fans(&mut self, uuid: &str) -> Result<()> {
+    fn update_fans(
+        &mut self,
+        uuid: &str,
+        tx_notificatioon: &broadcast::Sender<DeviceManagerNotification>,
+    ) -> Result<()> {
         if let Some(device) = self.devices.get_mut(uuid) {
             device.update_fan()?;
 
             // Update last update time
             self.last_fan_updates
                 .insert(uuid.to_string(), Instant::now());
+
+            // Send update notification
+            let notification =
+                DeviceManagerNotification::FanUpdated(uuid.to_string());
+            if let Err(_) = tx_notificatioon.send(notification) {
+                warn!("Failed to send FanUpdated notification");
+            }
 
             Ok(())
         } else {
@@ -650,7 +680,11 @@ impl DevicesManager {
 
     // Update the data on the given device and update the last
     // data update time
-    fn update_data(&mut self, uuid: &str) -> Result<()> {
+    fn update_data(
+        &mut self,
+        uuid: &str,
+        tx_notificatioon: &broadcast::Sender<DeviceManagerNotification>,
+    ) -> Result<()> {
         if let Some(device) = self.devices.get_mut(uuid) {
             let data = device.get_data()?;
             let vendor_data = device.get_vendor_data()?;
@@ -661,6 +695,18 @@ impl DevicesManager {
             // Update last update time
             self.last_data_updates
                 .insert(uuid.to_string(), Instant::now());
+
+            // Send update notification
+            let notification = DeviceManagerNotification::DataUpdated {
+                uuid: uuid.to_string(),
+                data: data.0,
+                vendor_data: vendor_data.0,
+                data_updates: data.1,
+                vendor_data_updates: vendor_data.1,
+            };
+            if let Err(_) = tx_notificatioon.send(notification) {
+                warn!("Failed to send DataUpdated notification");
+            }
 
             Ok(())
         } else {
