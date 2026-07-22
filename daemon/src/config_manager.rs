@@ -76,7 +76,7 @@ pub enum ConfigMessage {
     },
 
     // Assign the given profile on the given device
-    AssignProfile {
+    SetDeviceProfile {
         uuid: String,
         profile: String,
     },
@@ -90,11 +90,11 @@ pub enum ConfigMessage {
         profile: String,
         curve_name: Option<String>,
     },
-    SetFanUpdateInterval {
+    SetProfileFanUpdateInterval {
         profile: String,
         update_intrerval: Duration,
     },
-    SetDataUpdateInterval {
+    SetProfileDataUpdateInterval {
         profile: String,
         update_intrerval: Duration,
     },
@@ -113,15 +113,6 @@ pub enum ConfigMessage {
     SaveConfig,
 }
 
-// Internal parsed data types
-
-// The GPU data type is also used for serialization
-#[derive(Debug, Serialize, Deserialize, Clone)]
-struct DeviceConfig {
-    pub uuid: String,
-    pub profile: String,
-}
-
 #[derive(Debug, Serialize, Deserialize, Clone)]
 struct ProfileConfig {
     pub fan_mode: FanMode,
@@ -137,7 +128,7 @@ struct ProfileConfig {
 #[derive(Debug, Default, Serialize, Deserialize, Clone)]
 pub struct DaemonConfig {
     // Stored as UUID
-    device_profiles: HashMap<String, DeviceConfig>,
+    device_profiles: HashMap<String, String>,
     // Stored as names
     profile_configs: HashMap<String, ProfileConfig>,
     fan_curve_configs: HashMap<String, FanCurveInfo>,
@@ -199,7 +190,49 @@ impl ConfigManager {
 
     // Parse a message by dispatching it to the appropriate handler
     fn parse_message(&mut self, message: ConfigMessage) -> Result<()> {
-        match message {
+        let answer_packet = match message {
+            // Handle get message
+            ConfigMessage::GetFanCurve { uuid, tx } => {
+                let profile = self.get_profile(&uuid)?;
+
+                let fan_curve_info = if let Some(name) = &profile.fan_curve {
+                    self.config.fan_curve_configs.get(name).cloned()
+                } else {
+                    None
+                };
+
+                Some((tx, ConfigMessageAnswer::FanCurve(fan_curve_info)))
+            }
+            ConfigMessage::GetFanMode { uuid, tx } => {
+                let profile = self.get_profile(&uuid)?;
+
+                let fan_mode = profile.fan_mode;
+
+                Some((tx, ConfigMessageAnswer::FanMode(fan_mode)))
+            }
+            ConfigMessage::GetFanUpdateInterval { uuid, tx } => {
+                let profile = self.get_profile(&uuid)?;
+
+                let updata_interval = Some(profile.fan_update_interval);
+
+                Some((tx, ConfigMessageAnswer::FanUpdateInterval(updata_interval)))
+            }
+            ConfigMessage::GetDataUpdateInterval { uuid, tx } => {
+                let profile = self.get_profile(&uuid)?;
+
+                let updata_interval = Some(profile.data_update_interval);
+
+                Some((tx, ConfigMessageAnswer::DataUpdateInterval(updata_interval)))
+            }
+            ConfigMessage::GetDeviceConfig { uuid, tx } => {
+                let profile = self.get_profile(&uuid)?;
+
+                let device_config = profile.device_config;
+
+                Some((tx, ConfigMessageAnswer::DeviceConfig(device_config)))
+            }
+
+            // Handle set messages
             ConfigMessage::SetProfileFanMode { profile, mode } => {
                 let profile_config =
                     self.config.profile_configs.get_mut(&profile);
@@ -214,7 +247,7 @@ impl ConfigManager {
                     self.config.profile_configs.insert(profile, new_profile);
                 }
 
-                return Ok(());
+                None
             }
             ConfigMessage::SetProfileFanCurve {
                 profile,
@@ -233,9 +266,9 @@ impl ConfigManager {
                     self.config.profile_configs.insert(profile, new_profile);
                 }
 
-                return Ok(());
+                None
             }
-            ConfigMessage::SetFanUpdateInterval {
+            ConfigMessage::SetProfileFanUpdateInterval {
                 profile,
                 update_intrerval,
             } => {
@@ -252,9 +285,9 @@ impl ConfigManager {
                     self.config.profile_configs.insert(profile, new_profile);
                 }
 
-                return Ok(());
+                None
             }
-            ConfigMessage::SetDataUpdateInterval {
+            ConfigMessage::SetProfileDataUpdateInterval {
                 profile,
                 update_intrerval,
             } => {
@@ -271,7 +304,7 @@ impl ConfigManager {
                     self.config.profile_configs.insert(profile, new_profile);
                 }
 
-                return Ok(());
+                None
             }
             ConfigMessage::SetProfileDeviceConfig { profile, config } => {
                 let profile_config =
@@ -287,7 +320,7 @@ impl ConfigManager {
                     self.config.profile_configs.insert(profile, new_profile);
                 }
 
-                return Ok(());
+                None
             }
             ConfigMessage::SetFanCurve { curve_name, curve } => {
                 if let Some(curve_info) =
@@ -298,64 +331,28 @@ impl ConfigManager {
                     self.config.fan_curve_configs.insert(curve_name, curve);
                 };
 
-                return Ok(());
+                None
+            }
+            ConfigMessage::SetDeviceProfile { uuid, profile } => {
+                self.config.device_profiles.insert(uuid, profile);
+
+                None
             }
 
-            _ => {}
-        }
+            // Config save message
+            ConfigMessage::SaveConfig => {
+                self.save_config()?;
 
-        // Parse Get message
-        let (tx, answer) = match message {
-            ConfigMessage::GetFanCurve { uuid, tx } => {
-                let profile = self.get_profile(&uuid)?;
-
-                let fan_curve_info = if let Some(name) = &profile.fan_curve {
-                    self.config.fan_curve_configs.get(name).cloned()
-                } else {
-                    None
-                };
-
-                (tx, ConfigMessageAnswer::FanCurve(fan_curve_info))
-            }
-            ConfigMessage::GetFanMode { uuid, tx } => {
-                let profile = self.get_profile(&uuid)?;
-
-                let fan_mode = profile.fan_mode;
-
-                (tx, ConfigMessageAnswer::FanMode(fan_mode))
-            }
-            ConfigMessage::GetFanUpdateInterval { uuid, tx } => {
-                let profile = self.get_profile(&uuid)?;
-
-                let updata_interval = Some(profile.fan_update_interval);
-
-                (tx, ConfigMessageAnswer::FanUpdateInterval(updata_interval))
-            }
-            ConfigMessage::GetDataUpdateInterval { uuid, tx } => {
-                let profile = self.get_profile(&uuid)?;
-
-                let updata_interval = Some(profile.data_update_interval);
-
-                (tx, ConfigMessageAnswer::DataUpdateInterval(updata_interval))
-            }
-            ConfigMessage::GetDeviceConfig { uuid, tx } => {
-                let profile = self.get_profile(&uuid)?;
-
-                let device_config = profile.device_config;
-
-                (tx, ConfigMessageAnswer::DeviceConfig(device_config))
-            }
-
-            _ => {
-                return Err(anyhow!(format!(
-                    "Trying to parse unknown message"
-                )));
+                None
             }
         };
 
-        tx.send(answer).map_err(|_| {
-            anyhow!("Failed to send answer on one shot channel")
-        })?;
+        // Send the answer on the oneshot channel if needed
+        if let Some((tx, answer)) = answer_packet {
+            tx.send(answer).map_err(|_| {
+                anyhow!("Failed to send answer on one shot channel")
+            })?;
+        }
 
         Ok(())
     }
@@ -365,7 +362,7 @@ impl ConfigManager {
 
         let profile = if let Some(data) = device_profile {
             if let Some(profile) =
-                self.config.profile_configs.get(&data.profile)
+                self.config.profile_configs.get(data)
             {
                 profile.clone()
             } else {
