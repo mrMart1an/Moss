@@ -1,9 +1,9 @@
 use std::path::PathBuf;
 
-use argparse::{ArgumentParser, Print, Store};
+use argparse::{ArgumentParser, Print, StoreOption};
 
 pub struct ArgsOptions {
-    pub config_file_path: PathBuf,
+    pub config_file_path: Option<PathBuf>,
 }
 
 impl ArgsOptions {
@@ -16,7 +16,7 @@ impl ArgsOptions {
             // Configuration file path
             parser.refer(&mut options.config_file_path).add_option(
                 &["-c", "--config"],
-                Store,
+                StoreOption,
                 "The file path of the configuration file",
             );
 
@@ -38,7 +38,7 @@ impl ArgsOptions {
 impl Default for ArgsOptions {
     fn default() -> Self {
         Self { 
-            config_file_path: PathBuf::from("moss/config.json"),
+            config_file_path: None,
         }
     }
 }

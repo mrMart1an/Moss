@@ -1,7 +1,7 @@
 pub mod dbus_layer;
 
 use tokio::sync::mpsc;
-use tracing::info;
+use tracing::{info, Level};
 use tracing_subscriber::{prelude::*, fmt, EnvFilter};
 
 use crate::logger::dbus_layer::{DBusLog, DBusLoggingLayer};
@@ -17,6 +17,11 @@ pub fn init_logging(log_tx: mpsc::Sender<DBusLog>) {
         }
     };
 
+    // Disable trace and debug messages for the zbus crate,
+    // this prevent infinite loop from occurring while sending the log 
+    // over D-Bus
+    let filter = filter.add_directive("zbus=info".parse().unwrap());
+
     let fmt_layer = fmt::layer();
     let dbus_layer = DBusLoggingLayer::new(log_tx);
 
@@ -27,4 +32,12 @@ pub fn init_logging(log_tx: mpsc::Sender<DBusLog>) {
         .init();
 }
 
-
+pub fn level_to_u8(level: Level) -> u8 {
+    match level {
+        Level::ERROR => 0,
+        Level::WARN => 1,
+        Level::INFO => 2,
+        Level::DEBUG => 3,
+        Level::TRACE => 4,
+    }
+}

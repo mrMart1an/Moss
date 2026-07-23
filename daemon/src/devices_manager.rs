@@ -1,11 +1,8 @@
-use std::{
-    collections::HashMap,
-    sync::Arc,
-    time::{Duration, Instant},
-};
+use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use anyhow::{Context, anyhow};
 use nvml_wrapper::Nvml;
+use tokio::time::Instant;
 use tokio::{
     select,
     sync::{
@@ -116,6 +113,7 @@ pub enum DevicesManagerAnswer {
     DeviceVendorData(Option<(GpuVendorData, GpuVendorDataUpdates)>),
 }
 
+#[derive(Debug, Clone)]
 pub enum DeviceManagerNotification {
     // Notify of a device fan update, return the UUID of the updated device
     FanUpdated(String),
@@ -291,7 +289,7 @@ impl DevicesManager {
                         unwrap_or_else(|e| error!("{e}"));
                 },
                 // Update the fan and schedule the next update
-                _ = tokio::time::sleep(next_fan_update_time) => {
+                _ = tokio::time::sleep_until(next_fan_update_time) => {
                     self.update_fans(&next_fan_update_device, &tx_notificatioon)
                         .unwrap_or_else(|e| error!("{e}"));
 
@@ -299,7 +297,7 @@ impl DevicesManager {
                         self.schedule_fan_update();
                 }
                 // Update the data and schedule the next update
-                _ = tokio::time::sleep(next_data_update_time) => {
+                _ = tokio::time::sleep_until(next_data_update_time) => {
                     self.update_data(&next_data_update_device, &tx_notificatioon)
                         .unwrap_or_else(|e| error!("{e}"));
 
@@ -316,7 +314,30 @@ impl DevicesManager {
         tx_config: &Sender<ConfigMessage>,
     ) -> Result<()> {
         for (uuid, device) in self.devices.iter_mut() {
-            Self::apply_config(uuid, device, tx_config).await?;
+            let fan_interval =
+                if let Some(int) = self.fan_update_intervals.get_mut(uuid) {
+                    int
+                } else {
+                    error!("Trying to update config for non-existant device!");
+                    continue;
+                };
+
+            let data_interval =
+                if let Some(int) = self.data_update_intervals.get_mut(uuid) {
+                    int
+                } else {
+                    error!("Trying to update config for non-existant device!");
+                    continue;
+                };
+
+            Self::apply_config(
+                uuid,
+                device,
+                tx_config,
+                fan_interval,
+                data_interval,
+            )
+            .await?;
         }
 
         Ok(())
@@ -327,6 +348,8 @@ impl DevicesManager {
         uuid: &str,
         device: &mut Box<dyn GpuDevice + Send>,
         tx_config: &Sender<ConfigMessage>,
+        fan_interval_ref: &mut Duration,
+        data_interval_ref: &mut Duration,
     ) -> Result<()> {
         // Get the fan mode
         let (tx, rx) = oneshot::channel();
@@ -335,14 +358,8 @@ impl DevicesManager {
             tx,
         };
 
-        tx_config
-            .send(msg)
-            .await
-            .with_context(|| "Failed config manager send on fan mode query")?;
-
-        let fan_mode_answer = rx.await.with_context(
-            || "Failed config manager recive on fan mode query",
-        )?;
+        tx_config.send(msg).await?;
+        let fan_mode_answer = rx.await?;
 
         let fan_mode =
             if let ConfigMessageAnswer::FanMode(mode) = fan_mode_answer {
@@ -358,14 +375,9 @@ impl DevicesManager {
             tx,
         };
 
-        tx_config
-            .send(msg)
-            .await
-            .with_context(|| "Failed config manager send on fan curve query")?;
+        tx_config.send(msg).await?;
 
-        let fan_curve_answer = rx.await.with_context(
-            || "Failed config manager recive on fan curve query",
-        )?;
+        let fan_curve_answer = rx.await?;
 
         let fan_curve =
             if let ConfigMessageAnswer::FanCurve(curve) = fan_curve_answer {
@@ -381,13 +393,8 @@ impl DevicesManager {
             tx,
         };
 
-        tx_config.send(msg).await.with_context(
-            || "Failed config manager send on device config query",
-        )?;
-
-        let device_config_answer = rx.await.with_context(
-            || "Failed config manager recive on device config query",
-        )?;
+        tx_config.send(msg).await?;
+        let device_config_answer = rx.await?;
 
         let device_config = if let ConfigMessageAnswer::DeviceConfig(config) =
             device_config_answer
@@ -397,6 +404,44 @@ impl DevicesManager {
             return Err(anyhow!("Wrong answer from config manager!"));
         };
 
+        // Get fan update intervals
+        let (tx, rx) = oneshot::channel();
+        let msg = ConfigMessage::GetFanUpdateInterval {
+            uuid: uuid.to_string(),
+            tx,
+        };
+
+        tx_config.send(msg).await?;
+        let fan_interval_answer = rx.await?;
+
+        let fan_interval =
+            if let ConfigMessageAnswer::FanUpdateInterval(interval) =
+                fan_interval_answer
+            {
+                interval
+            } else {
+                return Err(anyhow!("Wrong answer from config manager!"));
+            };
+
+        // Get data update intervals
+        let (tx, rx) = oneshot::channel();
+        let msg = ConfigMessage::GetDataUpdateInterval {
+            uuid: uuid.to_string(),
+            tx,
+        };
+
+        tx_config.send(msg).await?;
+        let data_interval_answer = rx.await?;
+
+        let data_interval =
+            if let ConfigMessageAnswer::DataUpdateInterval(interval) =
+                data_interval_answer
+            {
+                interval
+            } else {
+                return Err(anyhow!("Wrong answer from config manager!"));
+            };
+
         // Apply the configuration to the device
         // NOTE: the fan curve must be applied before the fan mode
 
@@ -405,11 +450,19 @@ impl DevicesManager {
             let curve_box = Self::get_fan_curve_from_info(info);
             device.set_fan_curve(curve_box);
         }
-        device.set_fan_mode(fan_mode)?;
+        device.set_fan_mode(fan_mode).unwrap_or_else(|e| error!("{}", e));
 
         // Apply the device config
         if let Some(config) = device_config {
-            device.set_device_config(config)?;
+            device.set_device_config(config).unwrap_or_else(|e| error!("{}", e));
+        }
+
+        // Apply the update intervals
+        if let Some(int) = fan_interval {
+            *fan_interval_ref = int;
+        }
+        if let Some(int) = data_interval {
+            *data_interval_ref = int;
         }
 
         Ok(())
@@ -583,7 +636,32 @@ impl DevicesManager {
                     anyhow!("Trying to access non-existing device")
                 })?;
 
-                Self::apply_config(&uuid, device, tx_config).await?;
+                let fan_interval = if let Some(int) =
+                    self.fan_update_intervals.get_mut(&uuid)
+                {
+                    int
+                } else {
+                    error!("Trying to update config for non-existant device!");
+                    return Ok(());
+                };
+
+                let data_interval = if let Some(int) =
+                    self.data_update_intervals.get_mut(&uuid)
+                {
+                    int
+                } else {
+                    error!("Trying to update config for non-existant device!");
+                    return Ok(());
+                };
+
+                Self::apply_config(
+                    &uuid,
+                    device,
+                    tx_config,
+                    fan_interval,
+                    data_interval,
+                )
+                .await?;
             }
             DevicesManagerMessage::ApplyConfigToAllDevices => {
                 self.apply_config_all_device(tx_config).await?;
@@ -593,9 +671,9 @@ impl DevicesManager {
         Ok(())
     }
 
-    // Return the duration until the next required fan update
+    // Return the instant until the next required fan update
     // also return the UUID of the device to update
-    fn schedule_fan_update(&self) -> (String, Duration) {
+    fn schedule_fan_update(&self) -> (String, Instant) {
         let mut smallest_delta = Duration::MAX;
         let mut update_device = String::new();
 
@@ -617,12 +695,15 @@ impl DevicesManager {
             }
         }
 
-        (update_device, smallest_delta)
+        // Calculate the instant until we have to sleep
+        let update_time = Instant::now() + smallest_delta;
+
+        (update_device, update_time)
     }
 
-    // Return the duration until the next required data update
+    // Return the instant until the next required data update
     // also return the UUID of the device to update
-    fn schedule_data_update(&self) -> (String, Duration) {
+    fn schedule_data_update(&self) -> (String, Instant) {
         let mut smallest_delta = Duration::MAX;
         let mut update_device = String::new();
 
@@ -645,7 +726,10 @@ impl DevicesManager {
             }
         }
 
-        (update_device, smallest_delta)
+        // Calculate the instant until we have to sleep
+        let update_time = Instant::now() + smallest_delta;
+
+        (update_device, update_time)
     }
 
     // Update the fans on the given device and update the last
@@ -711,7 +795,7 @@ impl DevicesManager {
             Ok(())
         } else {
             Err(anyhow!(format!(
-                "Trying to update fan on non-existing device: {}",
+                "Trying to update data on non-existing device: {}",
                 uuid
             )))
         }

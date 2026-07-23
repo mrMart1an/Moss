@@ -5,12 +5,12 @@ use tracing::{Level, Subscriber, field::Visit};
 use tracing_subscriber::Layer;
 
 pub struct DBusLog {
-    level: Level,
+    pub level: Level,
 
-    file: Option<String>,
-    line: Option<u32>,
+    pub file: Option<String>,
+    pub line: Option<u32>,
 
-    message: String,
+    pub message: String,
 }
 
 struct DBusVisitor {

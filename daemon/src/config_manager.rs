@@ -1,18 +1,10 @@
 use anyhow::{Context, anyhow};
 use serde::{Deserialize, Serialize};
-use std::{
-    collections::HashMap,
-    fmt::Debug,
-    path::{Path, PathBuf},
-    time::Duration,
-};
+use std::{collections::HashMap, fmt::Debug, path::PathBuf, time::Duration};
 
 use tokio::{
     select,
-    sync::{
-        mpsc::Receiver,
-        oneshot,
-    },
+    sync::{mpsc::Receiver, oneshot},
 };
 use tokio_util::sync::CancellationToken;
 
@@ -21,10 +13,11 @@ use tracing::{debug, error, info, trace};
 use crate::{
     fan_curve::{fan_curve_info::FanCurveInfo, fan_mode::FanMode},
     gpu_device::{
-        DEFAULT_DATA_UPDATE_INTERVAL, DEFAULT_FAN_UPDATE_INTERVAL,
-        gpu_config::GpuConfig,
+        gpu_config::{GpuConfig},
     },
 };
+
+const DEFAULT_CONFIG_PATH: &str = "moss/config.toml";
 
 // Alias the result type for this module
 type Result<T> = std::result::Result<T, anyhow::Error>;
@@ -120,8 +113,8 @@ struct ProfileConfig {
 
     pub device_config: Option<GpuConfig>,
 
-    pub fan_update_interval: Duration,
-    pub data_update_interval: Duration,
+    pub fan_update_interval: Option<Duration>,
+    pub data_update_interval: Option<Duration>,
 }
 
 // The daemon config struct managed by confy
@@ -143,9 +136,15 @@ pub struct ConfigManager {
 
 impl ConfigManager {
     // Create a new configuration manager
-    pub fn new(config_path: &Path) -> Self {
+    pub fn new(config_path: Option<PathBuf>) -> Self {
+        let path = if let Some(path) = config_path {
+            path
+        } else {
+            PathBuf::from(DEFAULT_CONFIG_PATH)
+        };
+
         Self {
-            config_path: config_path.to_path_buf(),
+            config_path: path,
             config: DaemonConfig::default(),
         }
     }
@@ -157,6 +156,45 @@ impl ConfigManager {
         mut rx_message: Receiver<ConfigMessage>,
     ) {
         info!("Config manager: Running");
+
+        // NOTE: test generation of config
+
+        //self.config.device_profiles.insert(
+        //    "GPU-75f6d20c-3cea-093e-c165-0185a79f3e86".to_string(),
+        //    "myProfile".to_string(),
+        //);
+
+        //self.config.fan_curve_configs.insert(
+        //    "myCurve".to_string(),
+        //    FanCurveInfo {
+        //        points: Vec::from([(40, 40), (50, 50), (60, 80), (75, 100)]),
+        //        lower_threshold: Some(3),
+        //        upper_threshold: Some(2),
+        //    },
+        //);
+
+        //self.config.profile_configs.insert(
+        //    "myProfile".to_string(),
+        //    ProfileConfig {
+        //        fan_mode: FanMode::Curve,
+        //        fan_curve: Some("myCurve".to_string()),
+        //        device_config: Some(GpuConfig {
+        //            vendor_config: GpuVendorConfig::Nvidia {
+        //                core_clock_offset: None,
+        //                mem_clock_offset: None,
+        //            },
+        //            power_limit: None,
+        //        }),
+        //        fan_update_interval: Duration::from_secs(1),
+        //        data_update_interval: Duration::from_secs(1),
+        //    },
+        //);
+
+        //self.save_config().unwrap_or_else(|e| {
+        //    error!("{}", e);
+        //});
+
+        // NOTE: test generation of config
 
         // Parse the config file specified at creation time
         self.parse_config_file().unwrap_or_else(|e| {
@@ -190,6 +228,8 @@ impl ConfigManager {
 
     // Parse a message by dispatching it to the appropriate handler
     fn parse_message(&mut self, message: ConfigMessage) -> Result<()> {
+        trace!("Parsing message: {:?}", message);
+
         let answer_packet = match message {
             // Handle get message
             ConfigMessage::GetFanCurve { uuid, tx } => {
@@ -213,16 +253,22 @@ impl ConfigManager {
             ConfigMessage::GetFanUpdateInterval { uuid, tx } => {
                 let profile = self.get_profile(&uuid)?;
 
-                let updata_interval = Some(profile.fan_update_interval);
+                let updata_interval = profile.fan_update_interval;
 
-                Some((tx, ConfigMessageAnswer::FanUpdateInterval(updata_interval)))
+                Some((
+                    tx,
+                    ConfigMessageAnswer::FanUpdateInterval(updata_interval),
+                ))
             }
             ConfigMessage::GetDataUpdateInterval { uuid, tx } => {
                 let profile = self.get_profile(&uuid)?;
 
-                let updata_interval = Some(profile.data_update_interval);
+                let updata_interval = profile.data_update_interval;
 
-                Some((tx, ConfigMessageAnswer::DataUpdateInterval(updata_interval)))
+                Some((
+                    tx,
+                    ConfigMessageAnswer::DataUpdateInterval(updata_interval),
+                ))
             }
             ConfigMessage::GetDeviceConfig { uuid, tx } => {
                 let profile = self.get_profile(&uuid)?;
@@ -276,11 +322,11 @@ impl ConfigManager {
                     self.config.profile_configs.get_mut(&profile);
 
                 if let Some(profile_config) = profile_config {
-                    profile_config.fan_update_interval = update_intrerval;
+                    profile_config.fan_update_interval = Some(update_intrerval);
                 } else {
                     // Create e new profile if it doesn't already exist
                     let mut new_profile = ProfileConfig::default();
-                    new_profile.fan_update_interval = update_intrerval;
+                    new_profile.fan_update_interval = Some(update_intrerval);
 
                     self.config.profile_configs.insert(profile, new_profile);
                 }
@@ -295,11 +341,11 @@ impl ConfigManager {
                     self.config.profile_configs.get_mut(&profile);
 
                 if let Some(profile_config) = profile_config {
-                    profile_config.data_update_interval = update_intrerval;
+                    profile_config.data_update_interval = Some(update_intrerval);
                 } else {
                     // Create e new profile if it doesn't already exist
                     let mut new_profile = ProfileConfig::default();
-                    new_profile.data_update_interval = update_intrerval;
+                    new_profile.data_update_interval = Some(update_intrerval);
 
                     self.config.profile_configs.insert(profile, new_profile);
                 }
@@ -361,9 +407,7 @@ impl ConfigManager {
         let device_profile = self.config.device_profiles.get(uuid);
 
         let profile = if let Some(data) = device_profile {
-            if let Some(profile) =
-                self.config.profile_configs.get(data)
-            {
+            if let Some(profile) = self.config.profile_configs.get(data) {
                 profile.clone()
             } else {
                 ProfileConfig::default()
@@ -411,8 +455,8 @@ impl Default for ProfileConfig {
             fan_curve: None,
             device_config: None,
             fan_mode: FanMode::Auto,
-            fan_update_interval: DEFAULT_FAN_UPDATE_INTERVAL,
-            data_update_interval: DEFAULT_DATA_UPDATE_INTERVAL,
+            fan_update_interval: None,
+            data_update_interval: None,
         }
     }
 }

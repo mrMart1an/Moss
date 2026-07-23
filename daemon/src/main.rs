@@ -1,21 +1,20 @@
-// GLOBAL TODO
-// TODO: Add second channel to devices manager to
-// communicate data updates to the state manager
-// TODO: Add second channel to DBus service to be 
-// receive notification about data updates
-
 use anyhow::Result;
 use mossd::{
     arg_parser::ArgsOptions, config_manager::ConfigManager,
     dbus_service::DBusService, devices_manager::DevicesManager, logger,
-    state_manager::StateManager,
 };
-use tokio::{select, signal::ctrl_c, sync::mpsc};
+use tokio::{
+    select,
+    signal::ctrl_c,
+    sync::{broadcast, mpsc},
+};
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    logger::init_logging();
+    // The D-Bus layer will send each log onto this channel
+    let (tx_log, rx_log) = mpsc::channel(100);
+    logger::init_logging(tx_log);
 
     // Parse the command line arguments
     let args_options = ArgsOptions::parse();
@@ -24,63 +23,58 @@ async fn main() -> Result<()> {
     let tracker = TaskTracker::new();
     let token = CancellationToken::new();
 
-    // Use thin channel to move errors to the state task
-    // to later transmit then to the D-Bus
-    let (tx_err, rx_err) = mpsc::channel(16);
-
     // Start the configuration manager
     let (tx_config_manager, rx_config_manager) = mpsc::channel(16);
     {
         let token = token.clone();
-        let tx_err = tx_err.clone();
 
         tracker.spawn(async move {
             let mut config_manager =
-                ConfigManager::new(&args_options.config_file_path);
+                ConfigManager::new(args_options.config_file_path);
 
-            config_manager.run(token, rx_config_manager, tx_err).await;
+            config_manager.run(token, rx_config_manager).await;
         });
     }
 
-    // Start the GPUs manager
-    let (tx_gpus_manager, rx_gpus_manager) = mpsc::channel(16);
+    // Start the device manager
+    let (tx_devices_manager, rx_devices_manager) = mpsc::channel(16);
+    let (tx_devices_notification, rx_devices_notification) =
+        broadcast::channel(16);
     {
         let token = token.clone();
-        let tx_err = tx_err.clone();
+        let tx_config_manager = tx_config_manager.clone();
 
         tracker.spawn(async move {
             let mut devices_manager = DevicesManager::new();
-            devices_manager.run(token, rx_gpus_manager, tx_err).await;
+            devices_manager
+                .run(
+                    token,
+                    rx_devices_manager,
+                    tx_devices_notification,
+                    tx_config_manager,
+                )
+                .await;
         });
     }
 
     // Start the D-Bus service
-    let (tx_dbus_to_manager, rx_dbus_to_manager) = mpsc::channel(16);
-    let (tx_manager_to_dbus, rx_manager_to_dbus) = mpsc::channel(16);
     {
         let token = token.clone();
-        let tx_err = tx_err.clone();
+
+        let tx_devices_manager = tx_devices_manager.clone();
+        let tx_config_manager = tx_config_manager.clone();
 
         tracker.spawn(async move {
             let mut dbus_service = DBusService::new();
-            dbus_service.run(token, tx_dbus_to_manager, rx_manager_to_dbus, tx_err).await;
-        });
-    }
-
-    // Start the state manager
-    {
-        let token = token.clone();
-
-        tracker.spawn(async move {
-            let mut state_manager = StateManager::new(
-                tx_config_manager,
-                tx_gpus_manager,
-
-                rx_dbus_to_manager,
-                tx_manager_to_dbus
-            );
-
-            state_manager.run(token, rx_err).await;
+            dbus_service
+                .run(
+                    token,
+                    tx_devices_manager,
+                    tx_config_manager,
+                    rx_devices_notification,
+                    rx_log,
+                )
+                .await;
         });
     }
 
