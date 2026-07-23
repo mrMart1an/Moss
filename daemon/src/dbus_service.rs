@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use anyhow::{Context, anyhow};
 use tokio::{
     select,
@@ -43,11 +45,11 @@ const LOG_OBJECT_PATH: &str = "/com/github/Mossd1/Log";
 
 type Result<T> = std::result::Result<T, anyhow::Error>;
 
-#[derive(Debug)]
-pub enum DBusServiceAnswer {}
-
 pub struct DBusService {
     log_object_path: &'static str,
+
+    // Store the D-Bus path corresponding to each device UUID
+    device_dbus_path: HashMap<String, String>,
 }
 
 // Interface of the D-Bus service used for error reporting
@@ -239,6 +241,10 @@ impl GpuInterface {
             .map_err(|e| zbus::fdo::Error::Failed(format!("{:?}", e)))?;
         Ok(data.free_memory)
     }
+
+    // Fan update signal
+    #[zbus(signal)]
+    pub async fn fan_update(emitter: &SignalEmitter<'_>) -> zbus::Result<()>;
 }
 
 #[interface(name = "com.github.Mossd1.Nvidia")]
@@ -382,6 +388,7 @@ impl DBusService {
     pub fn new() -> Self {
         Self {
             log_object_path: LOG_OBJECT_PATH,
+            device_dbus_path: HashMap::new(),
         }
     }
 
@@ -398,8 +405,7 @@ impl DBusService {
         mut rx_dbus_log: Receiver<DBusLog>,
     ) {
         // Connect to the system D-Bus
-        // TODO: Switch to system bus
-        let connection = match Connection::session().await {
+        let connection = match Connection::system().await {
             Ok(conn) => conn,
             Err(err) => {
                 error!("Failed to establish connection with the bus: {}", err);
@@ -429,8 +435,55 @@ impl DBusService {
                         error!("Failed to send log signal: {}", e);
                     }
                 }
+                notification_res = rx_devices_notification.recv() => {
+                    let notification = if let Ok(notif) = notification_res {
+                        notif
+                    } else {
+                        continue;
+                    };
+
+                    if let Err(e) = self.send_notification_signals(&connection, notification).await {
+                        error!("Failed to send notificatioin signal: {}", e);
+                    }
+                }
             }
         }
+    }
+
+    async fn send_notification_signals(
+        &mut self,
+        connection: &Connection,
+        notification: DeviceManagerNotification,
+    ) -> Result<()> {
+        match notification {
+            DeviceManagerNotification::FanUpdated(uuid) => {
+                let path = self.device_dbus_path.get(&uuid);
+
+                if let Some(path) = path {
+                    // Get the interface and send the fan update signal signal
+                    let interface =
+                        Self::get_dbus_interface_ref::<GpuInterface>(
+                            connection, path,
+                        )
+                        .await?;
+
+                    interface.fan_update().await?;
+                } else {
+                    warn!("Fan updated for non existat GPU");
+                }
+            }
+            DeviceManagerNotification::DataUpdated {
+                uuid,
+                data,
+                vendor_data,
+                data_updates,
+                vendor_data_updates,
+            } => {
+                // TODO:
+            }
+        }
+
+        Ok(())
     }
 
     async fn initialize_service(
@@ -463,6 +516,9 @@ impl DBusService {
             debug!("Creating D-Bus object for GPU: {}", uuid);
 
             let path = format!("/com/github/Mossd1/Gpu{}", gpu_count);
+
+            // Store the D-Bus path for the device
+            self.device_dbus_path.insert(uuid.clone(), path.clone());
 
             Self::initialize_gpu_object(
                 path,
