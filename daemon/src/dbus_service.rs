@@ -22,7 +22,9 @@ use crate::{
         DeviceManagerNotification, DevicesManagerAnswer, DevicesManagerMessage,
     },
     gpu_device::{
-        gpu_data::{GpuData, GpuVendorData},
+        gpu_data::{
+            GpuData, GpuDataUpdates, GpuVendorData, GpuVendorDataUpdates,
+        },
         gpu_info::{GpuInfo, GpuVendorInfo},
     },
     logger::{dbus_layer::DBusLog, level_to_u8},
@@ -318,6 +320,99 @@ impl NvidiaInterface {
             0
         }
     }
+
+    // Nvidia vendor data
+    #[zbus(property)]
+    async fn sm_frequency(&self) -> zbus::fdo::Result<u32> {
+        let vendor_data = self.get_vendor_data().await.map_err(|e| {
+            zbus::fdo::Error::Failed(format!("Failed to retrive data: {}", e))
+        })?;
+
+        if let GpuVendorData::Nvidia { sm_freq, .. } = vendor_data {
+            Ok(sm_freq.unwrap_or_default())
+        } else {
+            Err(zbus::fdo::Error::Failed(format!(
+                "Wrong vendor data obtain"
+            )))
+        }
+    }
+    #[zbus(property)]
+    async fn video_frequency(&self) -> zbus::fdo::Result<u32> {
+        let vendor_data = self.get_vendor_data().await.map_err(|e| {
+            zbus::fdo::Error::Failed(format!("Failed to retrive data: {}", e))
+        })?;
+
+        if let GpuVendorData::Nvidia { video_freq, .. } = vendor_data {
+            Ok(video_freq.unwrap_or_default())
+        } else {
+            Err(zbus::fdo::Error::Failed(format!(
+                "Wrong vendor data obtain"
+            )))
+        }
+    }
+    #[zbus(property)]
+    async fn graphic_boost_frequency(&self) -> zbus::fdo::Result<u32> {
+        let vendor_data = self.get_vendor_data().await.map_err(|e| {
+            zbus::fdo::Error::Failed(format!("Failed to retrive data: {}", e))
+        })?;
+
+        if let GpuVendorData::Nvidia {
+            graphics_boost_freq,
+            ..
+        } = vendor_data
+        {
+            Ok(graphics_boost_freq.unwrap_or_default())
+        } else {
+            Err(zbus::fdo::Error::Failed(format!(
+                "Wrong vendor data obtain"
+            )))
+        }
+    }
+    #[zbus(property)]
+    async fn memory_boost_frequency(&self) -> zbus::fdo::Result<u32> {
+        let vendor_data = self.get_vendor_data().await.map_err(|e| {
+            zbus::fdo::Error::Failed(format!("Failed to retrive data: {}", e))
+        })?;
+
+        if let GpuVendorData::Nvidia { mem_boost_freq, .. } = vendor_data {
+            Ok(mem_boost_freq.unwrap_or_default())
+        } else {
+            Err(zbus::fdo::Error::Failed(format!(
+                "Wrong vendor data obtain"
+            )))
+        }
+    }
+    #[zbus(property)]
+    async fn sm_boost_frequency(&self) -> zbus::fdo::Result<u32> {
+        let vendor_data = self.get_vendor_data().await.map_err(|e| {
+            zbus::fdo::Error::Failed(format!("Failed to retrive data: {}", e))
+        })?;
+
+        if let GpuVendorData::Nvidia { sm_boost_freq, .. } = vendor_data {
+            Ok(sm_boost_freq.unwrap_or_default())
+        } else {
+            Err(zbus::fdo::Error::Failed(format!(
+                "Wrong vendor data obtain"
+            )))
+        }
+    }
+    #[zbus(property)]
+    async fn video_boost_frequency(&self) -> zbus::fdo::Result<u32> {
+        let vendor_data = self.get_vendor_data().await.map_err(|e| {
+            zbus::fdo::Error::Failed(format!("Failed to retrive data: {}", e))
+        })?;
+
+        if let GpuVendorData::Nvidia {
+            video_boost_freq, ..
+        } = vendor_data
+        {
+            Ok(video_boost_freq.unwrap_or_default())
+        } else {
+            Err(zbus::fdo::Error::Failed(format!(
+                "Wrong vendor data obtain"
+            )))
+        }
+    }
 }
 
 impl GpuInterface {
@@ -381,6 +476,28 @@ impl NvidiaInterface {
 
             gpu_vendor_info,
         })
+    }
+
+    async fn get_vendor_data(&self) -> Result<GpuVendorData> {
+        // Get the GPU infos
+        let (tx, rx) = oneshot::channel();
+        let message = DevicesManagerMessage::GetDeviceVendorData {
+            uuid: self.uuid.clone(),
+            tx,
+        };
+
+        self.tx_device_manager.send(message).await?;
+        let answer = rx.await?;
+
+        let gpu_vendor_data =
+            extract_answer!(DevicesManagerAnswer::DeviceVendorData, answer)?;
+
+        // Return an error if no data was provided by the manager
+        if let Some(data) = gpu_vendor_data {
+            Ok(data.0)
+        } else {
+            Err(anyhow!("Manager failed to provide device data"))
+        }
     }
 }
 
@@ -474,18 +591,173 @@ impl DBusService {
             }
             DeviceManagerNotification::DataUpdated {
                 uuid,
-                data,
-                vendor_data,
+                data: _data,
+                vendor_data: _vendor_data,
                 data_updates,
                 vendor_data_updates,
             } => {
                 // TODO:
+                let path = self.device_dbus_path.get(&uuid);
+
+                // Send GPU data update signal
+                if let Some(path) = path {
+                    Self::send_data_update_signal(
+                        connection,
+                        path,
+                        data_updates,
+                    )
+                    .await?;
+                } else {
+                    warn!("Data updated for non existat GPU");
+                }
+
+                // Send GPU vendor data update signal
+                if let Some(path) = path {
+                    Self::send_vendor_data_update_signal(
+                        connection,
+                        path,
+                        vendor_data_updates,
+                    )
+                    .await?;
+                } else {
+                    warn!("Vendor data updated for non existat GPU");
+                }
             }
         }
 
         Ok(())
     }
 
+    async fn send_data_update_signal(
+        connection: &Connection,
+        path: &str,
+        data_updates: GpuDataUpdates,
+    ) -> Result<()> {
+        // Get the GPU interface
+        let interface_ref =
+            Self::get_dbus_interface_ref::<GpuInterface>(connection, path)
+                .await?;
+        let interface = interface_ref.get().await;
+
+        // Create signal emitter
+        let emitter = SignalEmitter::new(connection, path)?;
+
+        // This will return an error if a field is added to the struct
+        let GpuDataUpdates {
+            temp_gpu,
+            graphics_freq,
+            mem_freq,
+            core_clock_offset,
+            mem_clock_offset,
+            power_usage,
+            power_limit,
+            fan_speed,
+            fan_speed_rpm,
+            core_usage,
+            mem_usage,
+            total_memory,
+            used_memory,
+            free_memory,
+        } = data_updates;
+
+        // Send the signals
+        if temp_gpu {
+            interface.temperature_changed(&emitter).await?;
+        }
+        if free_memory {
+            interface.free_memory_changed(&emitter).await?;
+        }
+        if fan_speed {
+            interface.fan_speed_changed(&emitter).await?;
+        }
+        if power_limit {
+            interface.power_limit_changed(&emitter).await?;
+        }
+        if power_usage {
+            interface.power_usage_changed(&emitter).await?;
+        }
+        if mem_clock_offset {
+            interface.memory_clock_offset_changed(&emitter).await?;
+        }
+        if fan_speed_rpm {
+            interface.fan_speed_rpm_changed(&emitter).await?;
+        }
+        if mem_usage {
+            interface.memory_usage_changed(&emitter).await?;
+        }
+        if core_usage {
+            interface.core_usage_changed(&emitter).await?;
+        }
+        if total_memory {
+            interface.total_memory_changed(&emitter).await?;
+        }
+        if used_memory {
+            interface.used_memory_changed(&emitter).await?;
+        }
+        if core_clock_offset {
+            interface.core_clock_offset_changed(&emitter).await?;
+        }
+        if graphics_freq {
+            interface.graphics_frequency_changed(&emitter).await?;
+        }
+        if mem_freq {
+            interface.memory_frequency_changed(&emitter).await?;
+        }
+
+        Ok(())
+    }
+
+    async fn send_vendor_data_update_signal(
+        connection: &Connection,
+        path: &str,
+        vendor_data_updates: GpuVendorDataUpdates,
+    ) -> Result<()> {
+        // Create signal emitter
+        let emitter = SignalEmitter::new(connection, path)?;
+
+        match vendor_data_updates {
+            GpuVendorDataUpdates::Nvidia {
+                sm_freq,
+                video_freq,
+                graphics_boost_freq,
+                mem_boost_freq,
+                sm_boost_freq,
+                video_boost_freq,
+            } => {
+                // Get the GPU interface
+                let interface_ref = Self::get_dbus_interface_ref::<
+                    NvidiaInterface,
+                >(connection, path)
+                .await?;
+                let interface = interface_ref.get().await;
+
+                // Send the signals
+                if sm_freq {
+                    interface.sm_frequency_changed(&emitter).await?;
+                }
+                if video_freq {
+                    interface.video_frequency_changed(&emitter).await?;
+                }
+                if graphics_boost_freq {
+                    interface.graphic_boost_frequency_changed(&emitter).await?;
+                }
+                if mem_boost_freq {
+                    interface.memory_boost_frequency_changed(&emitter).await?;
+                }
+                if sm_boost_freq {
+                    interface.sm_boost_frequency_changed(&emitter).await?;
+                }
+                if video_boost_freq {
+                    interface.video_boost_frequency_changed(&emitter).await?;
+                }
+            }
+            _ => {
+                error!("Unimplemented Vendor data update signals");
+            }
+        }
+
+        Ok(())
+    }
     async fn initialize_service(
         &mut self,
         connection: &Connection,
