@@ -12,9 +12,7 @@ use tracing::{debug, error, info, trace};
 
 use crate::{
     fan_curve::{fan_curve_info::FanCurveInfo, fan_mode::FanMode},
-    gpu_device::{
-        gpu_config::{GpuConfig},
-    },
+    gpu_device::gpu_config::GpuConfig,
 };
 
 const DEFAULT_CONFIG_PATH: &str = "moss/config.toml";
@@ -27,6 +25,7 @@ type Result<T> = std::result::Result<T, anyhow::Error>;
 pub enum ConfigMessageAnswer {
     FanMode(FanMode),
     FanCurve(Option<FanCurveInfo>),
+    FanCurveName(Option<String>),
     FanUpdateInterval(Option<Duration>),
     DataUpdateInterval(Option<Duration>),
     DeviceConfig(Option<GpuConfig>),
@@ -38,14 +37,13 @@ type Responder = oneshot::Sender<ConfigMessageAnswer>;
 #[derive(Debug)]
 pub enum ConfigMessage {
     // Get the fan mode for the given device
-    // Return None if the device doesn't exist in the configuration
-    GetFanMode {
+    GetDeviceFanMode {
         uuid: String,
         tx: Responder,
     },
     // Get the fan curve for the given device
     // Return None if the device doesn't exist in the configuration
-    GetFanCurve {
+    GetDeviceFanCurve {
         uuid: String,
         tx: Responder,
     },
@@ -57,14 +55,49 @@ pub enum ConfigMessage {
     },
     // Get the fan update interval for the given device
     // Return None if the device doesn't exist in the configuration
-    GetFanUpdateInterval {
+    GetDeviceFanUpdateInterval {
         uuid: String,
         tx: Responder,
     },
     // Get the data update interval for the given device
     // Return None if the device doesn't exist in the configuration
-    GetDataUpdateInterval {
+    GetDeviceDataUpdateInterval {
         uuid: String,
+        tx: Responder,
+    },
+
+    // Profile getter functions
+    // Get the fan mode for the given profile
+    GetProfileFanMode {
+        profile: String,
+        tx: Responder,
+    },
+    // Get the fan curve name for the given profile
+    // Return None if the profile doesn't exist in the configuration
+    // or if the option isn't set
+    GetProfileFanCurveName {
+        profile: String,
+        tx: Responder,
+    },
+    // Get the device config for the given profile
+    // Return None if the profile doesn't exist in the configuration
+    // or if the option isn't set
+    GetProfileConfig {
+        profile: String,
+        tx: Responder,
+    },
+    // Get the fan update interval for the given profile
+    // Return None if the profile doesn't exist in the configuration
+    // or if the option isn't set
+    GetProfileFanUpdateInterval {
+        profile: String,
+        tx: Responder,
+    },
+    // Get the data update interval for the given profile
+    // Return None if the profile doesn't exist in the configuration
+    // or if the option isn't set
+    GetProfileDataUpdateInterval {
+        profile: String,
         tx: Responder,
     },
 
@@ -85,11 +118,11 @@ pub enum ConfigMessage {
     },
     SetProfileFanUpdateInterval {
         profile: String,
-        update_intrerval: Duration,
+        update_intrerval: Option<Duration>,
     },
     SetProfileDataUpdateInterval {
         profile: String,
-        update_intrerval: Duration,
+        update_intrerval: Option<Duration>,
     },
     // Set a config for a profile
     SetProfileDeviceConfig {
@@ -104,6 +137,8 @@ pub enum ConfigMessage {
 
     // Save the configuration changes on the file
     SaveConfig,
+    // Revert the configuration to the one stored on the file
+    RevertConfig,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -232,7 +267,7 @@ impl ConfigManager {
 
         let answer_packet = match message {
             // Handle get message
-            ConfigMessage::GetFanCurve { uuid, tx } => {
+            ConfigMessage::GetDeviceFanCurve { uuid, tx } => {
                 let profile = self.get_profile(&uuid)?;
 
                 let fan_curve_info = if let Some(name) = &profile.fan_curve {
@@ -243,14 +278,14 @@ impl ConfigManager {
 
                 Some((tx, ConfigMessageAnswer::FanCurve(fan_curve_info)))
             }
-            ConfigMessage::GetFanMode { uuid, tx } => {
+            ConfigMessage::GetDeviceFanMode { uuid, tx } => {
                 let profile = self.get_profile(&uuid)?;
 
                 let fan_mode = profile.fan_mode;
 
                 Some((tx, ConfigMessageAnswer::FanMode(fan_mode)))
             }
-            ConfigMessage::GetFanUpdateInterval { uuid, tx } => {
+            ConfigMessage::GetDeviceFanUpdateInterval { uuid, tx } => {
                 let profile = self.get_profile(&uuid)?;
 
                 let updata_interval = profile.fan_update_interval;
@@ -260,7 +295,7 @@ impl ConfigManager {
                     ConfigMessageAnswer::FanUpdateInterval(updata_interval),
                 ))
             }
-            ConfigMessage::GetDataUpdateInterval { uuid, tx } => {
+            ConfigMessage::GetDeviceDataUpdateInterval { uuid, tx } => {
                 let profile = self.get_profile(&uuid)?;
 
                 let updata_interval = profile.data_update_interval;
@@ -276,6 +311,66 @@ impl ConfigManager {
                 let device_config = profile.device_config;
 
                 Some((tx, ConfigMessageAnswer::DeviceConfig(device_config)))
+            }
+
+            // Profile getters
+            ConfigMessage::GetProfileFanMode { profile, tx } => {
+                let fan_mode = if let Some(profile) =
+                    self.config.profile_configs.get(&profile)
+                {
+                    profile.fan_mode
+                } else {
+                    FanMode::Auto
+                };
+
+                Some((tx, ConfigMessageAnswer::FanMode(fan_mode)))
+            }
+            ConfigMessage::GetProfileFanCurveName { profile, tx } => {
+                let fan_curve = if let Some(profile) =
+                    self.config.profile_configs.get(&profile)
+                {
+                    profile.fan_curve.clone()
+                } else {
+                    None
+                };
+
+                Some((tx, ConfigMessageAnswer::FanCurveName(fan_curve)))
+            }
+            ConfigMessage::GetProfileConfig { profile, tx } => {
+                let config = if let Some(profile) =
+                    self.config.profile_configs.get(&profile)
+                {
+                    profile.device_config.clone()
+                } else {
+                    None
+                };
+
+                Some((tx, ConfigMessageAnswer::DeviceConfig(config)))
+            }
+            ConfigMessage::GetProfileFanUpdateInterval { profile, tx } => {
+                let fan_interval = if let Some(profile) =
+                    self.config.profile_configs.get(&profile)
+                {
+                    profile.fan_update_interval
+                } else {
+                    None
+                };
+
+                Some((tx, ConfigMessageAnswer::FanUpdateInterval(fan_interval)))
+            }
+            ConfigMessage::GetProfileDataUpdateInterval { profile, tx } => {
+                let data_interval = if let Some(profile) =
+                    self.config.profile_configs.get(&profile)
+                {
+                    profile.data_update_interval
+                } else {
+                    None
+                };
+
+                Some((
+                    tx,
+                    ConfigMessageAnswer::DataUpdateInterval(data_interval),
+                ))
             }
 
             // Handle set messages
@@ -322,11 +417,11 @@ impl ConfigManager {
                     self.config.profile_configs.get_mut(&profile);
 
                 if let Some(profile_config) = profile_config {
-                    profile_config.fan_update_interval = Some(update_intrerval);
+                    profile_config.fan_update_interval = update_intrerval;
                 } else {
                     // Create e new profile if it doesn't already exist
                     let mut new_profile = ProfileConfig::default();
-                    new_profile.fan_update_interval = Some(update_intrerval);
+                    new_profile.fan_update_interval = update_intrerval;
 
                     self.config.profile_configs.insert(profile, new_profile);
                 }
@@ -341,11 +436,11 @@ impl ConfigManager {
                     self.config.profile_configs.get_mut(&profile);
 
                 if let Some(profile_config) = profile_config {
-                    profile_config.data_update_interval = Some(update_intrerval);
+                    profile_config.data_update_interval = update_intrerval;
                 } else {
                     // Create e new profile if it doesn't already exist
                     let mut new_profile = ProfileConfig::default();
-                    new_profile.data_update_interval = Some(update_intrerval);
+                    new_profile.data_update_interval = update_intrerval;
 
                     self.config.profile_configs.insert(profile, new_profile);
                 }
@@ -388,6 +483,11 @@ impl ConfigManager {
             // Config save message
             ConfigMessage::SaveConfig => {
                 self.save_config()?;
+
+                None
+            }
+            ConfigMessage::RevertConfig => {
+                self.parse_config_file()?;
 
                 None
             }

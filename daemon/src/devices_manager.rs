@@ -353,7 +353,7 @@ impl DevicesManager {
     ) -> Result<()> {
         // Get the fan mode
         let (tx, rx) = oneshot::channel();
-        let msg = ConfigMessage::GetFanMode {
+        let msg = ConfigMessage::GetDeviceFanMode {
             uuid: uuid.to_string(),
             tx,
         };
@@ -370,7 +370,7 @@ impl DevicesManager {
 
         // Get the fan curve
         let (tx, rx) = oneshot::channel();
-        let msg = ConfigMessage::GetFanCurve {
+        let msg = ConfigMessage::GetDeviceFanCurve {
             uuid: uuid.to_string(),
             tx,
         };
@@ -406,7 +406,7 @@ impl DevicesManager {
 
         // Get fan update intervals
         let (tx, rx) = oneshot::channel();
-        let msg = ConfigMessage::GetFanUpdateInterval {
+        let msg = ConfigMessage::GetDeviceFanUpdateInterval {
             uuid: uuid.to_string(),
             tx,
         };
@@ -425,7 +425,7 @@ impl DevicesManager {
 
         // Get data update intervals
         let (tx, rx) = oneshot::channel();
-        let msg = ConfigMessage::GetDataUpdateInterval {
+        let msg = ConfigMessage::GetDeviceDataUpdateInterval {
             uuid: uuid.to_string(),
             tx,
         };
