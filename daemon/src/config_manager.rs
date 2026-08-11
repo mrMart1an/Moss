@@ -12,7 +12,7 @@ use tracing::{debug, error, info, trace};
 
 use crate::{
     fan_curve::{fan_curve_info::FanCurveInfo, fan_mode::FanMode},
-    gpu_device::gpu_config::GpuConfig,
+    gpu_device::gpu_config::{GpuConfig, NvidiaConfig},
 };
 
 const DEFAULT_CONFIG_PATH: &str = "moss/config.toml";
@@ -28,7 +28,9 @@ pub enum ConfigMessageAnswer {
     FanCurveName(Option<String>),
     FanUpdateInterval(Option<Duration>),
     DataUpdateInterval(Option<Duration>),
-    DeviceConfig(Option<GpuConfig>),
+    DeviceConfig(GpuConfig),
+
+    ProfilesList(Vec<String>),
 }
 
 type Responder = oneshot::Sender<ConfigMessageAnswer>;
@@ -101,10 +103,16 @@ pub enum ConfigMessage {
         tx: Responder,
     },
 
+    // List all the profile in the configuration
+    // return a list of profile names
+    ListProfiles {
+        tx: Responder,
+    },
+
     // Assign the given profile on the given device
     SetDeviceProfile {
         uuid: String,
-        profile: String,
+        profile: Option<String>,
     },
     // Set a fan mode for a profile
     SetProfileFanMode {
@@ -118,21 +126,30 @@ pub enum ConfigMessage {
     },
     SetProfileFanUpdateInterval {
         profile: String,
-        update_intrerval: Option<Duration>,
+        update_interval: Option<Duration>,
     },
     SetProfileDataUpdateInterval {
         profile: String,
-        update_intrerval: Option<Duration>,
+        update_interval: Option<Duration>,
     },
     // Set a config for a profile
     SetProfileDeviceConfig {
         profile: String,
-        config: Option<GpuConfig>,
+        config: GpuConfig,
     },
     // Update or add a new fan curve with the given name
     SetFanCurve {
         curve_name: String,
         curve: FanCurveInfo,
+    },
+
+    // Delete a fan curve from the configuration
+    DeleteFanCurve {
+        curve_name: String,
+    },
+    // Delete a fan curve from the configuration
+    DeleteProfile {
+        profile_name: String,
     },
 
     // Save the configuration changes on the file
@@ -146,7 +163,7 @@ struct ProfileConfig {
     pub fan_mode: FanMode,
     pub fan_curve: Option<String>,
 
-    pub device_config: Option<GpuConfig>,
+    pub device_config: GpuConfig,
 
     pub fan_update_interval: Option<Duration>,
     pub data_update_interval: Option<Duration>,
@@ -156,7 +173,7 @@ struct ProfileConfig {
 #[derive(Debug, Default, Serialize, Deserialize, Clone)]
 pub struct DaemonConfig {
     // Stored as UUID
-    device_profiles: HashMap<String, String>,
+    device_profiles: HashMap<String, Option<String>>,
     // Stored as names
     profile_configs: HashMap<String, ProfileConfig>,
     fan_curve_configs: HashMap<String, FanCurveInfo>,
@@ -196,7 +213,7 @@ impl ConfigManager {
 
         //self.config.device_profiles.insert(
         //    "GPU-75f6d20c-3cea-093e-c165-0185a79f3e86".to_string(),
-        //    "myProfile".to_string(),
+        //    Some("myProfile".to_string()),
         //);
 
         //self.config.fan_curve_configs.insert(
@@ -213,15 +230,15 @@ impl ConfigManager {
         //    ProfileConfig {
         //        fan_mode: FanMode::Curve,
         //        fan_curve: Some("myCurve".to_string()),
-        //        device_config: Some(GpuConfig {
-        //            vendor_config: GpuVendorConfig::Nvidia {
+        //        device_config: GpuConfig {
+        //            nvidia_config: NvidiaConfig {
         //                core_clock_offset: None,
         //                mem_clock_offset: None,
         //            },
         //            power_limit: None,
-        //        }),
-        //        fan_update_interval: Duration::from_secs(1),
-        //        data_update_interval: Duration::from_secs(1),
+        //        },
+        //        fan_update_interval: Some(Duration::from_secs(1)),
+        //        data_update_interval: Some(Duration::from_secs(1)),
         //    },
         //);
 
@@ -268,7 +285,7 @@ impl ConfigManager {
         let answer_packet = match message {
             // Handle get message
             ConfigMessage::GetDeviceFanCurve { uuid, tx } => {
-                let profile = self.get_profile(&uuid)?;
+                let profile = self.get_profile(&uuid);
 
                 let fan_curve_info = if let Some(name) = &profile.fan_curve {
                     self.config.fan_curve_configs.get(name).cloned()
@@ -279,14 +296,14 @@ impl ConfigManager {
                 Some((tx, ConfigMessageAnswer::FanCurve(fan_curve_info)))
             }
             ConfigMessage::GetDeviceFanMode { uuid, tx } => {
-                let profile = self.get_profile(&uuid)?;
+                let profile = self.get_profile(&uuid);
 
                 let fan_mode = profile.fan_mode;
 
                 Some((tx, ConfigMessageAnswer::FanMode(fan_mode)))
             }
             ConfigMessage::GetDeviceFanUpdateInterval { uuid, tx } => {
-                let profile = self.get_profile(&uuid)?;
+                let profile = self.get_profile(&uuid);
 
                 let updata_interval = profile.fan_update_interval;
 
@@ -296,7 +313,7 @@ impl ConfigManager {
                 ))
             }
             ConfigMessage::GetDeviceDataUpdateInterval { uuid, tx } => {
-                let profile = self.get_profile(&uuid)?;
+                let profile = self.get_profile(&uuid);
 
                 let updata_interval = profile.data_update_interval;
 
@@ -306,7 +323,7 @@ impl ConfigManager {
                 ))
             }
             ConfigMessage::GetDeviceConfig { uuid, tx } => {
-                let profile = self.get_profile(&uuid)?;
+                let profile = self.get_profile(&uuid);
 
                 let device_config = profile.device_config;
 
@@ -342,7 +359,7 @@ impl ConfigManager {
                 {
                     profile.device_config.clone()
                 } else {
-                    None
+                    GpuConfig::default()
                 };
 
                 Some((tx, ConfigMessageAnswer::DeviceConfig(config)))
@@ -371,6 +388,17 @@ impl ConfigManager {
                     tx,
                     ConfigMessageAnswer::DataUpdateInterval(data_interval),
                 ))
+            }
+
+            // List messages
+            ConfigMessage::ListProfiles { tx } => {
+                let mut list = Vec::new();
+
+                for (profile, _) in self.config.profile_configs.iter() {
+                    list.push(profile.clone());
+                }
+
+                Some((tx, ConfigMessageAnswer::ProfilesList(list)))
             }
 
             // Handle set messages
@@ -411,7 +439,7 @@ impl ConfigManager {
             }
             ConfigMessage::SetProfileFanUpdateInterval {
                 profile,
-                update_intrerval,
+                update_interval: update_intrerval,
             } => {
                 let profile_config =
                     self.config.profile_configs.get_mut(&profile);
@@ -430,7 +458,7 @@ impl ConfigManager {
             }
             ConfigMessage::SetProfileDataUpdateInterval {
                 profile,
-                update_intrerval,
+                update_interval: update_intrerval,
             } => {
                 let profile_config =
                     self.config.profile_configs.get_mut(&profile);
@@ -480,6 +508,18 @@ impl ConfigManager {
                 None
             }
 
+            // Delete messages
+            ConfigMessage::DeleteFanCurve { curve_name } => {
+                self.config.fan_curve_configs.remove(&curve_name);
+
+                None
+            }
+            ConfigMessage::DeleteProfile { profile_name } => {
+                self.config.profile_configs.remove(&profile_name);
+
+                None
+            }
+
             // Config save message
             ConfigMessage::SaveConfig => {
                 self.save_config()?;
@@ -503,11 +543,13 @@ impl ConfigManager {
         Ok(())
     }
 
-    fn get_profile(&self, uuid: &str) -> Result<ProfileConfig> {
+    fn get_profile(&self, uuid: &str) -> ProfileConfig {
         let device_profile = self.config.device_profiles.get(uuid);
 
-        let profile = if let Some(data) = device_profile {
-            if let Some(profile) = self.config.profile_configs.get(data) {
+        let profile = if let Some(data) = device_profile.cloned() {
+            if let Some(profile) =
+                self.config.profile_configs.get(&data.unwrap_or_default())
+            {
                 profile.clone()
             } else {
                 ProfileConfig::default()
@@ -516,7 +558,7 @@ impl ConfigManager {
             ProfileConfig::default()
         };
 
-        Ok(profile)
+        profile
     }
 
     fn parse_config_file(&mut self) -> Result<()> {
@@ -553,7 +595,7 @@ impl Default for ProfileConfig {
     fn default() -> Self {
         Self {
             fan_curve: None,
-            device_config: None,
+            device_config: GpuConfig::default(),
             fan_mode: FanMode::Auto,
             fan_update_interval: None,
             data_update_interval: None,

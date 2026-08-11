@@ -23,8 +23,17 @@ impl ConfigInterface {
             .await
             .map_err(|e| zbus::fdo::Error::Failed(format!("{}", e)))
     }
-    // Save the config to the file
+    // Save the config to the file, also apply it to all devices
     async fn save_config(&self) -> zbus::fdo::Result<()> {
+        // Apply the configuration to all devices
+        let message = DevicesManagerMessage::ApplyConfigToAllDevices;
+
+        self.tx_device_manager
+            .send(message)
+            .await
+            .map_err(|e| zbus::fdo::Error::Failed(format!("{}", e)))?;
+
+        // Save the configuration
         let message = ConfigMessage::SaveConfig;
 
         self.tx_config_manager
@@ -34,13 +43,23 @@ impl ConfigInterface {
     }
     // Revert the config to the one stored on the config file
     async fn revert_config(&self) -> zbus::fdo::Result<()> {
+        // Revert the config to the one stored on file
         let message = ConfigMessage::RevertConfig;
 
         self.tx_config_manager
             .send(message)
             .await
+            .map_err(|e| zbus::fdo::Error::Failed(format!("{}", e)))?;
+
+        // Apply the reverted changes to the device manager
+        let message = DevicesManagerMessage::ApplyConfigToAllDevices;
+
+        self.tx_device_manager
+            .send(message)
+            .await
             .map_err(|e| zbus::fdo::Error::Failed(format!("{}", e)))
     }
+
 }
 
 impl ConfigInterface {

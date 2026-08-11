@@ -450,12 +450,14 @@ impl DevicesManager {
             let curve_box = Self::get_fan_curve_from_info(info);
             device.set_fan_curve(curve_box);
         }
-        device.set_fan_mode(fan_mode).unwrap_or_else(|e| error!("{}", e));
+        device
+            .set_fan_mode(fan_mode)
+            .unwrap_or_else(|e| error!("{}", e));
 
         // Apply the device config
-        if let Some(config) = device_config {
-            device.set_device_config(config).unwrap_or_else(|e| error!("{}", e));
-        }
+        device
+            .set_device_config(device_config)
+            .unwrap_or_else(|e| error!("{}", e));
 
         // Apply the update intervals
         if let Some(int) = fan_interval {

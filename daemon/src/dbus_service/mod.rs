@@ -2,6 +2,8 @@ mod config_interface;
 mod gpu_interface;
 mod log_interface;
 mod nvidia_interface;
+mod profile_interface;
+mod profile_nvidia_interface;
 
 use std::collections::HashMap;
 
@@ -23,12 +25,13 @@ use zbus::{
 };
 
 use crate::{
-    config_manager::ConfigMessage,
+    config_manager::{ConfigMessage, ConfigMessageAnswer},
     dbus_service::{
         config_interface::ConfigInterface,
         gpu_interface::{GpuInterface, GpuInterfaceSignals},
         log_interface::{LogInterface, LogInterfaceSignals},
         nvidia_interface::NvidiaInterface,
+        profile_interface::ProfileInterface, profile_nvidia_interface::ProfileNvidiaInterface,
     },
     devices_manager::{
         DeviceManagerNotification, DevicesManagerAnswer, DevicesManagerMessage,
@@ -51,6 +54,19 @@ macro_rules! extract_answer {
 
         result
     }};
+}
+
+// Convert an Option to a D-Bus friendly tuple
+pub fn opt_dbus<T: Default>(opt: Option<T>) -> (bool, T) {
+    if let Some(data) = opt {
+        (true, data)
+    } else {
+        (false, T::default())
+    }
+}
+// Convert a D-Bus friendly tuple to an Option
+pub fn dbus_opt<T>(opt: (bool, T)) -> Option<T> {
+    if opt.0 { Some(opt.1) } else { None }
 }
 
 const SERVICE_NAME: &str = "com.github.Mossd1";
@@ -156,7 +172,7 @@ impl DBusService {
         let config_object = ConfigInterface::new(
             connection.clone(),
             tx_device_manager,
-            tx_config_manager,
+            tx_config_manager.clone(),
         );
 
         connection
@@ -169,6 +185,40 @@ impl DBusService {
             .object_server()
             .at(format!("{}/Items", CONFIG_OBJECT_PATH), ObjectManager)
             .await?;
+
+        // Generate the already existing configuration objects
+        // Get the Profiles
+        let (tx, rx) = oneshot::channel();
+        let message = ConfigMessage::ListProfiles { tx };
+
+        tx_config_manager.send(message).await?;
+        let answer = rx.await?;
+
+        let profile_list =
+            extract_answer!(ConfigMessageAnswer::ProfilesList, answer)?;
+
+        // Generate the profiles objects
+        for profile in profile_list.iter() {
+            // Generate profile interface
+            let profile_interface = ProfileInterface::new(
+                profile.clone(),
+                tx_config_manager.clone(),
+            );
+            connection.object_server().at(
+                format!("{}/Items/{}", CONFIG_OBJECT_PATH, profile),
+                profile_interface,
+            ).await?;
+
+            // Generate profile Nvidia interface
+            let profile_nvidia_interface = ProfileNvidiaInterface::new(
+                profile.clone(),
+                tx_config_manager.clone(),
+            );
+            connection.object_server().at(
+                format!("{}/Items/{}", CONFIG_OBJECT_PATH, profile),
+                profile_nvidia_interface,
+            ).await?;
+        }
 
         Ok(())
     }

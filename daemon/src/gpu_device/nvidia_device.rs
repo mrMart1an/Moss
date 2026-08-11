@@ -15,7 +15,7 @@ use crate::{
     fan_curve::{FanCurve, fan_mode::FanMode},
     gpu_device::{
         GpuDevice, GpuVendor, Result,
-        gpu_config::{GpuConfig, GpuVendorConfig},
+        gpu_config::GpuConfig,
         gpu_data::{
             GpuData, GpuDataUpdates, GpuVendorData, GpuVendorDataUpdates,
         },
@@ -447,17 +447,11 @@ impl GpuDevice for NvidiaDevice {
         }
 
         // Set vendor specific config
-        if let GpuVendorConfig::Nvidia {
-            core_clock_offset,
-            mem_clock_offset,
-        } = gpu_config.vendor_config
-        {
-            if let Some(offset) = core_clock_offset {
-                device.set_gpc_clock_vf_offset(offset)?;
-            }
-            if let Some(offset) = mem_clock_offset {
-                device.set_mem_clock_vf_offset(offset)?;
-            }
+        if let Some(offset) = gpu_config.nvidia_config.core_clock_offset {
+            device.set_gpc_clock_vf_offset(offset)?;
+        }
+        if let Some(offset) = gpu_config.nvidia_config.mem_clock_offset {
+            device.set_mem_clock_vf_offset(offset)?;
         }
 
         Ok(())
