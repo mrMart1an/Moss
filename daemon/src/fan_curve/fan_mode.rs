@@ -2,8 +2,9 @@ use anyhow::{anyhow, Context};
 use serde::{Deserialize, Serialize};
 
 // Device fan mode
-#[derive(Debug, Serialize, Deserialize, Clone, Copy)]
+#[derive(Debug, Default, Serialize, Deserialize, Clone, Copy)]
 pub enum FanMode {
+    #[default]
     Auto,
     Curve,
 

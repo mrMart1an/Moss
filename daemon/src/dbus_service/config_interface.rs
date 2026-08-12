@@ -2,7 +2,12 @@ use tokio::sync::mpsc::Sender;
 use zbus::{Connection, interface};
 
 use crate::{
-    config_manager::ConfigMessage, devices_manager::DevicesManagerMessage,
+    config_manager::ConfigMessage,
+    dbus_service::{
+        CONFIG_OBJECT_PATH, profile_interface::ProfileInterface,
+        profile_nvidia_interface::ProfileNvidiaInterface,
+    },
+    devices_manager::DevicesManagerMessage,
 };
 
 pub struct ConfigInterface {
@@ -10,6 +15,8 @@ pub struct ConfigInterface {
 
     tx_device_manager: Sender<DevicesManagerMessage>,
     tx_config_manager: Sender<ConfigMessage>,
+
+    profiles_list: Vec<String>,
 }
 
 #[interface(name = "com.github.Mossd1.Config")]
@@ -60,6 +67,121 @@ impl ConfigInterface {
             .map_err(|e| zbus::fdo::Error::Failed(format!("{}", e)))
     }
 
+    // Profile management
+
+    // Create a new profile with the given name,
+    // NOTE: this function also revert all non saved change up to this point
+    async fn create_profile(
+        &mut self,
+        profile_name: String,
+    ) -> zbus::fdo::Result<()> {
+        // Check if the name is already assigned
+        if self.profiles_list.contains(&profile_name) {
+            return Err(zbus::fdo::Error::Failed(format!(
+                "The profile already exist!"
+            )));
+        }
+
+        // Revert the configuration
+        self.revert_config().await?;
+
+        // Create the profile
+        let message = ConfigMessage::CreateProfile {
+            profile_name: profile_name.clone(),
+        };
+
+        self.tx_config_manager
+            .send(message)
+            .await
+            .map_err(|e| zbus::fdo::Error::Failed(format!("{}", e)))?;
+
+        // Save the new config
+        self.save_config().await?;
+
+        // Add the D-Bus profile object
+        self.add_dbus_profile(profile_name).await?;
+
+        Ok(())
+    }
+
+    // Delete a profile from the configuration
+    // NOTE: this function also revert all non saved change up to this point
+    async fn delete_profile(
+        &mut self,
+        profile_name: String,
+    ) -> zbus::fdo::Result<()> {
+        // Check if the name actually exist
+        if !self.profiles_list.contains(&profile_name) {
+            return Err(zbus::fdo::Error::Failed(format!(
+                "The profile doesn't exist!"
+            )));
+        }
+
+        // Revert the configuration
+        self.revert_config().await?;
+
+        // Create the profile
+        let message = ConfigMessage::DeleteProfile {
+            profile_name: profile_name.clone(),
+        };
+
+        self.tx_config_manager
+            .send(message)
+            .await
+            .map_err(|e| zbus::fdo::Error::Failed(format!("{}", e)))?;
+
+        // Save the new config
+        self.save_config().await?;
+
+        // Delete the D-Bus object
+        self.delete_dbus_profile(profile_name).await?;
+
+        Ok(())
+    }
+
+    // Rename a profile in the configuration
+    // NOTE: this function also revert all non saved change up to this point
+    async fn rename_profile(
+        &mut self,
+        old_name: String,
+        new_name: String,
+    ) -> zbus::fdo::Result<()> {
+        // Check if the old name actually exist
+        if !self.profiles_list.contains(&old_name) {
+            return Err(zbus::fdo::Error::Failed(format!(
+                "The profile doesn't exist!"
+            )));
+        }
+        // Check if the new name doesn't already exist
+        if self.profiles_list.contains(&new_name) {
+            return Err(zbus::fdo::Error::Failed(format!(
+                "The profile already exist!"
+            )));
+        }
+
+        // Revert the configuration
+        self.revert_config().await?;
+
+        // Create the profile
+        let message = ConfigMessage::RenameProfile {
+            old_name: old_name.clone(),
+            new_name: new_name.clone(),
+        };
+
+        self.tx_config_manager
+            .send(message)
+            .await
+            .map_err(|e| zbus::fdo::Error::Failed(format!("{}", e)))?;
+
+        // Save the new config
+        self.save_config().await?;
+
+        // Delete the old D-Bus object and create the new one
+        self.delete_dbus_profile(old_name).await?;
+        self.delete_dbus_profile(new_name).await?;
+
+        Ok(())
+    }
 }
 
 impl ConfigInterface {
@@ -67,11 +189,81 @@ impl ConfigInterface {
         connection: Connection,
         tx_device_manager: Sender<DevicesManagerMessage>,
         tx_config_manager: Sender<ConfigMessage>,
+        profiles_list: Vec<String>,
     ) -> Self {
         Self {
             connection,
             tx_device_manager,
             tx_config_manager,
+            profiles_list,
         }
+    }
+
+    async fn add_dbus_profile(
+        &mut self,
+        profile_name: String,
+    ) -> zbus::fdo::Result<()> {
+        // Generate new D-Bus object
+        // Generate profile interface
+        let profile_interface = ProfileInterface::new(
+            profile_name.clone(),
+            self.tx_config_manager.clone(),
+        );
+        self.connection
+            .object_server()
+            .at(
+                format!("{}/Items/{}", CONFIG_OBJECT_PATH, profile_name),
+                profile_interface,
+            )
+            .await?;
+
+        // Generate profile Nvidia interface
+        let profile_nvidia_interface = ProfileNvidiaInterface::new(
+            profile_name.clone(),
+            self.tx_config_manager.clone(),
+        );
+        self.connection
+            .object_server()
+            .at(
+                format!("{}/Items/{}", CONFIG_OBJECT_PATH, profile_name),
+                profile_nvidia_interface,
+            )
+            .await?;
+
+        // Add the profile to the list
+        self.profiles_list.push(profile_name);
+
+        Ok(())
+    }
+
+    async fn delete_dbus_profile(
+        &mut self,
+        profile_name: String,
+    ) -> zbus::fdo::Result<()> {
+        // Delete the profile object from the D-Bus service
+        self.connection
+            .object_server()
+            .remove::<ProfileInterface, _>(format!(
+                "{}/Items/{}",
+                CONFIG_OBJECT_PATH, profile_name
+            ))
+            .await?;
+
+        self.connection
+            .object_server()
+            .remove::<ProfileNvidiaInterface, _>(format!(
+                "{}/Items/{}",
+                CONFIG_OBJECT_PATH, profile_name
+            ))
+            .await?;
+
+        // Remove the profile from the profiles list
+        if let Some(i) =
+            self.profiles_list.iter().position(|x| *x == profile_name)
+        {
+            self.profiles_list.remove(i);
+        }
+
+        Ok(())
     }
 }

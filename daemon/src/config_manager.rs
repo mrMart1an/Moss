@@ -12,7 +12,7 @@ use tracing::{debug, error, info, trace};
 
 use crate::{
     fan_curve::{fan_curve_info::FanCurveInfo, fan_mode::FanMode},
-    gpu_device::gpu_config::{GpuConfig, NvidiaConfig},
+    gpu_device::gpu_config::GpuConfig,
 };
 
 const DEFAULT_CONFIG_PATH: &str = "moss/config.toml";
@@ -141,6 +141,26 @@ pub enum ConfigMessage {
     SetFanCurve {
         curve_name: String,
         curve: FanCurveInfo,
+    },
+
+    // Create a new profile
+    CreateProfile {
+        profile_name: String,
+    },
+    // Create a new fan curve
+    CreateFanCurve {
+        curve_name: String,
+    },
+
+    // rename a profile
+    RenameProfile {
+        old_name: String,
+        new_name: String,
+    },
+    // Rename a fan curve
+    RenameFanCurve {
+        old_name: String,
+        new_name: String,
     },
 
     // Delete a fan curve from the configuration
@@ -512,10 +532,104 @@ impl ConfigManager {
             ConfigMessage::DeleteFanCurve { curve_name } => {
                 self.config.fan_curve_configs.remove(&curve_name);
 
+                // Update all the reference to this profile to None
+                for (_, profile_ref) in self.config.profile_configs.iter_mut() {
+                    if let Some(fan_curve_ref) = &mut profile_ref.fan_curve {
+                        if *fan_curve_ref == curve_name {
+                            profile_ref.fan_curve = None;
+                        }
+                    }
+                }
+
                 None
             }
             ConfigMessage::DeleteProfile { profile_name } => {
                 self.config.profile_configs.remove(&profile_name);
+
+                // Update all the reference to this profile to None
+                for (_, profile_ref_opt) in
+                    self.config.device_profiles.iter_mut()
+                {
+                    if let Some(profile_ref) = profile_ref_opt {
+                        if *profile_ref == profile_name {
+                            *profile_ref_opt = None;
+                        }
+                    }
+                }
+
+                None
+            }
+
+            // Create messages
+            ConfigMessage::CreateProfile { profile_name } => {
+                self.config
+                    .profile_configs
+                    .insert(profile_name, ProfileConfig::default());
+
+                None
+            }
+            ConfigMessage::CreateFanCurve { curve_name } => {
+                self.config
+                    .fan_curve_configs
+                    .insert(curve_name, FanCurveInfo::default());
+
+                None
+            }
+
+            // Rename messages
+            ConfigMessage::RenameProfile { old_name, new_name } => {
+                // Move the profile
+                let old_profile = self
+                    .config
+                    .profile_configs
+                    .get(&old_name)
+                    .cloned()
+                    .unwrap_or_default();
+
+                self.config
+                    .profile_configs
+                    .insert(new_name.clone(), old_profile);
+
+                // Delete the old one
+                self.config.profile_configs.remove(&old_name);
+
+                // Update all the reference to this profile to the new name
+                for (_, profile_ref_opt) in
+                    self.config.device_profiles.iter_mut()
+                {
+                    if let Some(profile_ref) = profile_ref_opt {
+                        if *profile_ref == old_name {
+                            *profile_ref = new_name.clone();
+                        }
+                    }
+                }
+
+                None
+            }
+            ConfigMessage::RenameFanCurve { old_name, new_name } => {
+                // Move the profile
+                let old_curve = self
+                    .config
+                    .fan_curve_configs
+                    .get(&old_name)
+                    .cloned()
+                    .unwrap_or_default();
+
+                self.config
+                    .fan_curve_configs
+                    .insert(new_name.clone(), old_curve);
+
+                // Delete the old one
+                self.config.fan_curve_configs.remove(&old_name);
+
+                // Update all the reference to this profile to the new name
+                for (_, profile_ref) in self.config.profile_configs.iter_mut() {
+                    if let Some(fan_curve_ref) = &mut profile_ref.fan_curve {
+                        if *fan_curve_ref == old_name {
+                            *fan_curve_ref = new_name.clone();
+                        }
+                    }
+                }
 
                 None
             }

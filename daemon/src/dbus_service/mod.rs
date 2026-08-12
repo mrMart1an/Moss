@@ -169,10 +169,22 @@ impl DBusService {
         tx_device_manager: Sender<DevicesManagerMessage>,
         tx_config_manager: Sender<ConfigMessage>,
     ) -> Result<()> {
+        // Get the Profiles
+        let (tx, rx) = oneshot::channel();
+        let message = ConfigMessage::ListProfiles { tx };
+
+        tx_config_manager.send(message).await?;
+        let answer = rx.await?;
+
+        let profile_list =
+            extract_answer!(ConfigMessageAnswer::ProfilesList, answer)?;
+
+        // Generate the configuration object
         let config_object = ConfigInterface::new(
             connection.clone(),
             tx_device_manager,
             tx_config_manager.clone(),
+            profile_list.clone(),
         );
 
         connection
@@ -187,15 +199,6 @@ impl DBusService {
             .await?;
 
         // Generate the already existing configuration objects
-        // Get the Profiles
-        let (tx, rx) = oneshot::channel();
-        let message = ConfigMessage::ListProfiles { tx };
-
-        tx_config_manager.send(message).await?;
-        let answer = rx.await?;
-
-        let profile_list =
-            extract_answer!(ConfigMessageAnswer::ProfilesList, answer)?;
 
         // Generate the profiles objects
         for profile in profile_list.iter() {
