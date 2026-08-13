@@ -31,6 +31,7 @@ pub enum ConfigMessageAnswer {
     DeviceConfig(GpuConfig),
 
     ProfilesList(Vec<String>),
+    FanCurvesList(Vec<String>),
 }
 
 type Responder = oneshot::Sender<ConfigMessageAnswer>;
@@ -102,10 +103,21 @@ pub enum ConfigMessage {
         profile: String,
         tx: Responder,
     },
+    // Get a fan curve info with the specified name
+    // Return None if the requested fan curve doesn't exist
+    GetFanCurve {
+        fan_curve: String,
+        tx: Responder,
+    },
 
     // List all the profile in the configuration
     // return a list of profile names
     ListProfiles {
+        tx: Responder,
+    },
+    // List all the fan curves in the configuration
+    // return a list of fan curve names
+    ListFanCurves {
         tx: Responder,
     },
 
@@ -409,6 +421,12 @@ impl ConfigManager {
                     ConfigMessageAnswer::DataUpdateInterval(data_interval),
                 ))
             }
+            ConfigMessage::GetFanCurve { fan_curve, tx } => {
+                let fan_curve =
+                    self.config.fan_curve_configs.get(&fan_curve).cloned();
+
+                Some((tx, ConfigMessageAnswer::FanCurve(fan_curve)))
+            }
 
             // List messages
             ConfigMessage::ListProfiles { tx } => {
@@ -419,6 +437,15 @@ impl ConfigManager {
                 }
 
                 Some((tx, ConfigMessageAnswer::ProfilesList(list)))
+            }
+            ConfigMessage::ListFanCurves { tx } => {
+                let mut list = Vec::new();
+
+                for (curve, _) in self.config.fan_curve_configs.iter() {
+                    list.push(curve.clone());
+                }
+
+                Some((tx, ConfigMessageAnswer::FanCurvesList(list)))
             }
 
             // Handle set messages

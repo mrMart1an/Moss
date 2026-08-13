@@ -1,4 +1,5 @@
 mod config_interface;
+mod fan_curve_interface;
 mod gpu_interface;
 mod log_interface;
 mod nvidia_interface;
@@ -28,10 +29,12 @@ use crate::{
     config_manager::{ConfigMessage, ConfigMessageAnswer},
     dbus_service::{
         config_interface::ConfigInterface,
+        fan_curve_interface::FanCurveInterface,
         gpu_interface::{GpuInterface, GpuInterfaceSignals},
         log_interface::{LogInterface, LogInterfaceSignals},
         nvidia_interface::NvidiaInterface,
-        profile_interface::ProfileInterface, profile_nvidia_interface::ProfileNvidiaInterface,
+        profile_interface::ProfileInterface,
+        profile_nvidia_interface::ProfileNvidiaInterface,
     },
     devices_manager::{
         DeviceManagerNotification, DevicesManagerAnswer, DevicesManagerMessage,
@@ -71,7 +74,10 @@ pub fn dbus_opt<T>(opt: (bool, T)) -> Option<T> {
 
 const SERVICE_NAME: &str = "com.github.Mossd1";
 const LOG_OBJECT_PATH: &str = "/com/github/Mossd1/Log";
+
 const CONFIG_OBJECT_PATH: &str = "/com/github/Mossd1/Config";
+const PROFILE_OBJECT_SUBPATH: &str = "/Profiles";
+const FAN_CURVE_OBJECT_SUBPATH: &str = "/FanCurves";
 
 type Result<T> = std::result::Result<T, anyhow::Error>;
 
@@ -176,15 +182,26 @@ impl DBusService {
         tx_config_manager.send(message).await?;
         let answer = rx.await?;
 
-        let profile_list =
+        let profiles_list =
             extract_answer!(ConfigMessageAnswer::ProfilesList, answer)?;
+
+        // Get the Fan Curves
+        let (tx, rx) = oneshot::channel();
+        let message = ConfigMessage::ListFanCurves { tx };
+
+        tx_config_manager.send(message).await?;
+        let answer = rx.await?;
+
+        let fan_curves_list =
+            extract_answer!(ConfigMessageAnswer::FanCurvesList, answer)?;
 
         // Generate the configuration object
         let config_object = ConfigInterface::new(
             connection.clone(),
             tx_device_manager,
             tx_config_manager.clone(),
-            profile_list.clone(),
+            profiles_list.clone(),
+            fan_curves_list.clone(),
         );
 
         connection
@@ -195,32 +212,63 @@ impl DBusService {
         // Create the object manager for the config objects
         connection
             .object_server()
-            .at(format!("{}/Items", CONFIG_OBJECT_PATH), ObjectManager)
+            .at(format!("{}", CONFIG_OBJECT_PATH), ObjectManager)
             .await?;
 
         // Generate the already existing configuration objects
 
         // Generate the profiles objects
-        for profile in profile_list.iter() {
+        for profile in profiles_list.iter() {
             // Generate profile interface
             let profile_interface = ProfileInterface::new(
                 profile.clone(),
                 tx_config_manager.clone(),
             );
-            connection.object_server().at(
-                format!("{}/Items/{}", CONFIG_OBJECT_PATH, profile),
-                profile_interface,
-            ).await?;
+            connection
+                .object_server()
+                .at(
+                    format!(
+                        "{}{}/{}",
+                        CONFIG_OBJECT_PATH, PROFILE_OBJECT_SUBPATH, profile
+                    ),
+                    profile_interface,
+                )
+                .await?;
 
             // Generate profile Nvidia interface
             let profile_nvidia_interface = ProfileNvidiaInterface::new(
                 profile.clone(),
                 tx_config_manager.clone(),
             );
-            connection.object_server().at(
-                format!("{}/Items/{}", CONFIG_OBJECT_PATH, profile),
-                profile_nvidia_interface,
-            ).await?;
+            connection
+                .object_server()
+                .at(
+                    format!(
+                        "{}{}/{}",
+                        CONFIG_OBJECT_PATH, PROFILE_OBJECT_SUBPATH, profile
+                    ),
+                    profile_nvidia_interface,
+                )
+                .await?;
+        }
+
+        // Generate the fan curves objects
+        for curve in fan_curves_list.iter() {
+            // Generate the fan curve interface
+            let fan_curve_interface = FanCurveInterface::new(
+                curve.clone(),
+                tx_config_manager.clone(),
+            );
+            connection
+                .object_server()
+                .at(
+                    format!(
+                        "{}{}/{}",
+                        CONFIG_OBJECT_PATH, FAN_CURVE_OBJECT_SUBPATH, curve
+                    ),
+                    fan_curve_interface,
+                )
+                .await?;
         }
 
         Ok(())
