@@ -26,8 +26,7 @@ use zbus::{
 };
 
 use crate::{
-    config_manager::{ConfigMessage, ConfigMessageAnswer},
-    dbus_service::{
+    config, config_manager::{ConfigMessage, ConfigMessageAnswer}, dbus_service::{
         config_interface::ConfigInterface,
         fan_curve_interface::FanCurveInterface,
         gpu_interface::{GpuInterface, GpuInterfaceSignals},
@@ -35,15 +34,12 @@ use crate::{
         nvidia_interface::NvidiaInterface,
         profile_interface::ProfileInterface,
         profile_nvidia_interface::ProfileNvidiaInterface,
-    },
-    devices_manager::{
+    }, devices_manager::{
         DeviceManagerNotification, DevicesManagerAnswer, DevicesManagerMessage,
-    },
-    gpu_device::{
+    }, gpu_device::{
         gpu_data::{GpuDataUpdates, GpuVendorDataUpdates},
         gpu_info::GpuVendorInfo,
-    },
-    logger::{dbus_layer::DBusLog, level_to_u8},
+    }, logger::{dbus_layer::DBusLog, level_to_u8}
 };
 
 #[macro_export]
@@ -72,7 +68,6 @@ pub fn dbus_opt<T>(opt: (bool, T)) -> Option<T> {
     if opt.0 { Some(opt.1) } else { None }
 }
 
-const SERVICE_NAME: &str = "com.github.Mossd1";
 const LOG_OBJECT_PATH: &str = "/com/github/Mossd1/Log";
 
 const CONFIG_OBJECT_PATH: &str = "/com/github/Mossd1/Config";
@@ -323,7 +318,7 @@ impl DBusService {
         // NOTE:    The name request must happen AFTER setting up the
         //          server object or messages might be lost
         connection
-            .request_name(SERVICE_NAME)
+            .request_name(config::service_name())
             .await
             .with_context(|| "Failed to acquire service name")?;
 

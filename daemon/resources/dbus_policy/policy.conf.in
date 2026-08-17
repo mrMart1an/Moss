@@ -6,10 +6,10 @@
 
 <busconfig>
   <policy user="root">
-    <allow own="com.github.Mossd1"/>
+    <allow own="@SERVICE_NAME@"/>
   </policy>
 
   <policy context="default">
-    <allow send_destination="com.github.Mossd1"/>
+    <allow send_destination="@SERVICE_NAME@"/>
   </policy>
 </busconfig>

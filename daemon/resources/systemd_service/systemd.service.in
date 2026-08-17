@@ -3,9 +3,9 @@ Description=Moss GPU manager control daemon
 
 [Service]
 Type=dbus
-BusName=org.moss.Mossd
-ExecStart=/usr/sbin/example-service
+BusName=@SERVICE_NAME@
+ExecStart=@BINDIR@/@SERVICE_EXE_NAME@
 
 [Install]
 WantedBy=multi-user.target
-Alias=dbus-org.moss.Mossd.service
+Alias=dbus-@SERVICE_NAME@.service

@@ -1,0 +1,5 @@
+[D-BUS Service]
+Name=@SERVICE_NAME@
+Exec=@BINDIR@/@SERVICE_EXE_NAME@
+User=root
+SystemdService=@SERVICE_EXE_NAME@.service

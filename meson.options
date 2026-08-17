@@ -1,0 +1,13 @@
+option(
+  'profile',
+  type: 'combo',
+  choices: [
+    'release',
+    'development'
+  ],
+  value: 'release',
+  description: 'The build profile for the daemon and gtk application. One of "release" or "development".'
+)
+
+option('mossd', type: 'boolean', value: true, description: 'Build and install the D-Bus daemon and releated files')
+option('moss-gtk', type: 'boolean', value: true, description: 'Build and install the GTK application')

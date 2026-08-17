@@ -1,0 +1,10 @@
+[package]
+name = "moss"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0"
+zbus = "5.9.0"
+tracing = { version = "0.1.41", features = [] }
+gtk = { version = "0.10.3", package = "gtk4", features = ["v4_2"] }
