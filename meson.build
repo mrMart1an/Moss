@@ -6,6 +6,7 @@ is_devel = get_option('profile') == 'development'
 # Installation paths
 bindir = get_option('prefix') / get_option('bindir')
 datadir = get_option('prefix') / get_option('datadir')
+pkgdatadir = datadir / meson.project_name()
 
 if get_option('mossd')
     subdir('daemon')

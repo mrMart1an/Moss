@@ -1,6 +1,12 @@
 # Build configurations
 gtk_exe_name = 'moss'
-app_id = 'com.github.Moss'
+
+base_id = 'com.github.Moss'
+if is_devel
+    app_id = '@0@Dev'.format(base_id)
+else
+    app_id = base_id 
+endif
 
 # Cargo options
 cargo = find_program('cargo')
@@ -13,6 +19,9 @@ if not is_devel
 else
     rust_target = 'debug'
 endif
+
+# Import GNOME module
+gnome = import('gnome')
 
 custom_target(
     'build-moss-gtk',
@@ -34,4 +43,12 @@ custom_target(
         meson.project_build_root() / 'target' / rust_target / gtk_exe_name,
         '@OUTPUT@',
     ],
+)
+
+subdir('data')
+
+# Execute these tasks after installing
+gnome.post_install(
+    glib_compile_schemas: true,
+    update_desktop_database: true,
 )

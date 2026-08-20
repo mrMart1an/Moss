@@ -1,0 +1,8 @@
+[Desktop Entry]
+Name=Moss
+Exec=moss
+Icon=@APP_ID@
+Terminal=false
+Type=Application
+DBusActivatable=false
+Categories=GNOME;GTK;Utility;Graphics;Video;
