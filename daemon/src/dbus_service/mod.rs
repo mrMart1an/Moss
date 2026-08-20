@@ -26,7 +26,9 @@ use zbus::{
 };
 
 use crate::{
-    config, config_manager::{ConfigMessage, ConfigMessageAnswer}, dbus_service::{
+    config,
+    config_manager::{ConfigMessage, ConfigMessageAnswer},
+    dbus_service::{
         config_interface::ConfigInterface,
         fan_curve_interface::FanCurveInterface,
         gpu_interface::{GpuInterface, GpuInterfaceSignals},
@@ -34,12 +36,15 @@ use crate::{
         nvidia_interface::NvidiaInterface,
         profile_interface::ProfileInterface,
         profile_nvidia_interface::ProfileNvidiaInterface,
-    }, devices_manager::{
+    },
+    devices_manager::{
         DeviceManagerNotification, DevicesManagerAnswer, DevicesManagerMessage,
-    }, gpu_device::{
+    },
+    gpu_device::{
         gpu_data::{GpuDataUpdates, GpuVendorDataUpdates},
         gpu_info::GpuVendorInfo,
-    }, logger::{dbus_layer::DBusLog, level_to_u8}
+    },
+    logger::{dbus_layer::DBusLog, level_to_u8},
 };
 
 #[macro_export]
@@ -132,6 +137,17 @@ impl DBusService {
                 tx_config_manager,
             )
             .await
+        {
+            error!("{}", err);
+        }
+
+        // Request the service name
+        // NOTE:    The name request must happen AFTER setting up the
+        //          server object or messages might be lost
+        if let Err(err) = connection
+            .request_name(config::service_name())
+            .await
+            .with_context(|| "Failed to acquire service name")
         {
             error!("{}", err);
         }
@@ -313,14 +329,6 @@ impl DBusService {
 
             gpu_count += 1;
         }
-
-        // Request the service name
-        // NOTE:    The name request must happen AFTER setting up the
-        //          server object or messages might be lost
-        connection
-            .request_name(config::service_name())
-            .await
-            .with_context(|| "Failed to acquire service name")?;
 
         Ok(())
     }

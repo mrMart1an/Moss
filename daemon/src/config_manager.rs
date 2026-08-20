@@ -11,11 +11,8 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, trace};
 
 use crate::{
-    fan_curve::{fan_curve_info::FanCurveInfo, fan_mode::FanMode},
-    gpu_device::gpu_config::GpuConfig,
+    config, fan_curve::{fan_curve_info::FanCurveInfo, fan_mode::FanMode}, gpu_device::gpu_config::GpuConfig
 };
-
-const DEFAULT_CONFIG_PATH: &str = "moss/config.toml";
 
 // Alias the result type for this module
 type Result<T> = std::result::Result<T, anyhow::Error>;
@@ -224,7 +221,7 @@ impl ConfigManager {
         let path = if let Some(path) = config_path {
             path
         } else {
-            PathBuf::from(DEFAULT_CONFIG_PATH)
+            PathBuf::from(config::default_config_path())
         };
 
         Self {

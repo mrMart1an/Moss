@@ -5,7 +5,7 @@ use mossd::{
 };
 use tokio::{
     select,
-    signal::ctrl_c,
+    signal::unix::{signal, Signal, SignalKind},
     sync::{broadcast, mpsc},
 };
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
@@ -78,11 +78,13 @@ async fn main() -> Result<()> {
         });
     }
 
-    // TODO: Handle different unix signal for graceful termination
-    select! {
-        _ = ctrl_c() => {
+    // Handle shutdown signals
+    let mut sigint = signal(SignalKind::interrupt()).unwrap();
+    let mut sigterm = signal(SignalKind::terminate()).unwrap();
 
-        },
+    select! {
+        _ = sigint.recv() => { },
+        _ = sigterm.recv() => { },
     }
 
     // Cancel the token to communicate the program

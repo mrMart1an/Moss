@@ -1,6 +1,7 @@
 # Build configurations
 service_exe_name = 'mossd'
 service_name = 'com.github.Mossd1'
+default_config_path = '/etc/moss/config.toml'
 
 # Cargo options
 cargo = find_program('cargo')
@@ -24,6 +25,7 @@ custom_target(
     install_dir: bindir,
     env: {
         'SERVICE_NAME': service_name,
+        'DEFAULT_CONFIG_PATH': default_config_path,
     },
     command: [
         cargo,

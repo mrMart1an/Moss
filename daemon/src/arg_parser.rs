@@ -34,7 +34,6 @@ impl ArgsOptions {
     }
 }
 
-// TODO: change this to /etc/moss/config.json
 impl Default for ArgsOptions {
     fn default() -> Self {
         Self { 
